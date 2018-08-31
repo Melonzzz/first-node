@@ -1,0 +1,4822 @@
+﻿GSP_GR_CheckInQueryInfo	
+----------------------------------------------------------------------------------------------------
+-- 查询签到
+CREATE PROC GSP_GR_CheckInQueryInfo
+	@dwUserID INT,								-- 用户 I D
+	@strPassword NCHAR(32),						-- 用户密码
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 查询用户
+	IF not exists(SELECT * FROM AccountsInfo WHERE UserID=@dwUserID AND LogonPass=@strPassword)
+	BEGIN
+		SET @strErrorDescribe = N'抱歉，你的用户信息不存在或者密码不正确！'
+		return 1
+	END
+
+	-- 签到记录
+	DECLARE @wSeriesDate INT	
+	DECLARE @StartDateTime DateTime
+	DECLARE @LastDateTime DateTime
+	SELECT @StartDateTime=StartDateTime,@LastDateTime=LastDateTime,@wSeriesDate=SeriesDate FROM AccountsSignin 	
+	WHERE UserID=@dwUserID
+	IF @StartDateTime IS NULL OR @LastDateTime IS NULL OR @wSeriesDate IS NULL
+	BEGIN
+		SELECT @StartDateTime=GetDate(),@LastDateTime=GetDate(),@wSeriesDate=0
+		INSERT INTO AccountsSignin VALUES(@dwUserID,@StartDateTime,@LastDateTime,0)		
+	END
+
+	-- 调整日期
+	IF @wSeriesDate > 7 SET @wSeriesDate = 7
+
+	-- 日期判断
+	DECLARE @TodayCheckIned TINYINT
+	SET @TodayCheckIned = 0
+	IF DateDiff(dd,@LastDateTime,GetDate()) = 0 	
+	BEGIN
+		IF @wSeriesDate > 0 SET @TodayCheckIned = 1
+	END ELSE
+	BEGIN		
+		IF DateDiff(dd,@StartDateTime,GetDate()) <> @wSeriesDate OR @wSeriesDate >= 7 
+		BEGIN
+			SET @wSeriesDate = 0
+			UPDATE AccountsSignin SET StartDateTime=GetDate(),LastDateTime=GetDate(),SeriesDate=0 WHERE UserID=@dwUserID									
+		END
+	END
+
+	-- 抛出数据
+	SELECT @wSeriesDate AS SeriesDate,@TodayCheckIned AS TodayCheckIned	
+END
+
+RETURN 0
+
+
+GSP_GR_CheckInDone	
+----------------------------------------------------------------------------------------------------
+
+-- 查询奖励
+CREATE PROC GSP_GR_CheckInDone
+	@dwUserID INT,								-- 用户 I D
+	@strPassword NCHAR(32),						-- 用户密码
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineID NVARCHAR(32),					-- 机器标识
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 查询用户
+	IF not exists(SELECT * FROM AccountsInfo WHERE UserID=@dwUserID AND LogonPass=@strPassword)
+	BEGIN
+		SET @strErrorDescribe = N'抱歉，你的用户信息不存在或者密码不正确！'
+		return 1
+	END
+
+	-- 签到记录
+	DECLARE @wSeriesDate INT	
+	DECLARE @StartDateTime DateTime
+	DECLARE @LastDateTime DateTime
+	SELECT @StartDateTime=StartDateTime,@LastDateTime=LastDateTime,@wSeriesDate=SeriesDate FROM AccountsSignin 
+	WHERE UserID=@dwUserID
+	IF @StartDateTime IS NULL OR @LastDateTime IS NULL OR @wSeriesDate IS NULL
+	BEGIN
+		SELECT @StartDateTime = GetDate(),@LastDateTime = GetDate(),@wSeriesDate = 0
+		INSERT INTO AccountsSignin VALUES(@dwUserID,@StartDateTime,@LastDateTime,0)		
+	END
+
+	-- 签到判断
+	IF DateDiff(dd,@LastDateTime,GetDate()) = 0 AND @wSeriesDate > 0
+	BEGIN
+		SET @strErrorDescribe = N'抱歉，您今天已经签到了！'
+		return 3		
+	END
+
+	-- 日期越界
+	IF @wSeriesDate > 7
+	BEGIN
+		SET @strErrorDescribe = N'您的签到信息出现异常，请与我们的客服人员联系！'
+		return 2				
+	END
+
+	-- 更新记录
+	SET @wSeriesDate = @wSeriesDate+1
+	UPDATE AccountsSignin SET LastDateTime = GetDate(),SeriesDate = @wSeriesDate WHERE UserID = @dwUserID
+
+	-- 查询奖励
+	DECLARE @lRewardGold BIGINT
+	SELECT @lRewardGold=RewardGold FROM   THPlatformDB.dbo.SigninConfig WHERE DayID=@wSeriesDate
+	IF @lRewardGold IS NULL 
+	BEGIN
+		SET @lRewardGold = 0
+	END	
+
+	-- 奖励金币	
+	UPDATE   THTreasureDB.dbo.GameScoreInfo SET Score = Score + @lRewardGold WHERE UserID = @dwUserID
+	IF @@rowcount = 0
+	BEGIN
+		-- 插入资料
+		INSERT INTO   THTreasureDB.dbo.GameScoreInfo (UserID,Score, LastLogonIP, LastLogonMachine, RegisterIP, RegisterMachine)
+		VALUES (@dwUserID, @lRewardGold, @strClientIP, @strMachineID, @strClientIP, @strMachineID)
+	END
+
+	-- 签到记录	
+	INSERT   THRecordDB.dbo.RecordSignin(UserID,RewardGold,ClientID,InputDate)
+	VALUES (@dwUserID,@lRewardGold,@strClientIP,GetDate())
+
+	-- 查询金币
+	DECLARE @lScore BIGINT	
+	SELECT @lScore=Score FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID = @dwUserID 	
+	IF @lScore IS NULL SET @lScore = 0
+	
+	-- 抛出数据
+	SELECT @lScore AS Score	
+END
+
+RETURN 0
+
+
+GSP_GR_ManageUserRight	
+----------------------------------------------------------------------------------------------------
+
+-- 设置权限
+CREATE PROC GSP_GR_ManageUserRight
+	@dwUserID		INT,				-- 用户 I D
+	@dwAddRight		INT,				-- 增加权限
+	@dwRemoveRight	INT					-- 删除权限
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+	-- 设置权限
+	UPDATE AccountsInfo SET UserRight=UserRight|@dwAddRight WHERE UserID=@dwUserID
+	UPDATE AccountsInfo SET UserRight=(~@dwRemoveRight)&UserRight WHERE UserID=@dwUserID	
+END
+
+RETURN 0
+
+
+GSP_GP_CheckUserRight	
+----------------------------------------------------------------------------------------------------
+
+-- 检查权限
+CREATE PROC GSP_GP_CheckUserRight
+	@strAccounts	NVARCHAR(31),		-- 用户帐号
+	@dwcheckRight	INT,					-- 校验权限	
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 查询权限
+	DECLARE @dwMasterRight INT
+	SELECT @dwMasterRight=MasterRight FROM AccountsInfo WHERE Accounts=@strAccounts AND MasterOrder>0
+	
+	-- 调整权限
+	IF @dwMasterRight IS NULL
+	BEGIN
+		SET @dwMasterRight=0
+	END
+
+	-- 检查权限
+	IF (@dwMasterRight&@dwcheckRight)=0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉,由于您权限不足,登录失败！'
+		RETURN 1
+	END	
+			
+END
+
+RETURN 0
+
+
+GSP_GP_VerifyIndividual	
+----------------------------------------------------------------------------------------------------
+
+-- 查询资料
+CREATE PROC GSP_GP_VerifyIndividual
+	@wVerifyMask INT,							-- 校验掩码
+	@strVerifyContent NVARCHAR(32),				-- 校验内容
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 校验帐号
+	IF @wVerifyMask=1
+	BEGIN
+		IF exists(SELECT * FROM AccountsInfo WHERE Accounts=@strVerifyContent)
+		BEGIN
+			SET @strErrorDescribe=N'该帐号已被占用！'
+			RETURN 1			
+		END
+	END
+
+	-- 校验昵称
+	IF @wVerifyMask=2
+	BEGIN
+		IF exists(SELECT * FROM AccountsInfo WHERE NickName=@strVerifyContent)
+		BEGIN
+			SET @strErrorDescribe=N'该昵称已被占用！'
+			RETURN 1
+		END
+	END
+
+	RETURN 0
+
+END
+
+RETURN 0
+
+
+GSP_GP_ModifyLogonPassword	
+----------------------------------------------------------------------------------------------------
+
+-- 修改密码
+CREATE PROC GSP_GP_ModifyLogonPassword
+	@dwUserID INT,								-- 用户 I D
+	@strSrcPassword NCHAR(32),					-- 用户密码
+	@strNewPassword NCHAR(32),					-- 用户密码
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 变量定义
+	DECLARE @UserID INT
+	DECLARE @Nullity BIT
+	DECLARE @StunDown BIT
+	DECLARE @LogonPass AS NCHAR(32)
+
+	-- 查询用户
+	SELECT @UserID=UserID, @LogonPass=LogonPass, @Nullity=Nullity, @StunDown=StunDown
+	FROM AccountsInfo(NOLOCK) WHERE UserID=@dwUserID
+
+	-- 查询用户
+	IF @UserID IS NULL
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试！'
+		RETURN 1
+	END	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+
+	-- 帐号关闭
+	IF @StunDown<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号使用了安全关闭功能，必须重新开通后才能继续使用！'
+		RETURN 2
+	END	
+	
+	-- 密码判断
+	IF @LogonPass<>@strSrcPassword
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试！'
+		RETURN 3
+	END
+
+	-- 密码判断
+	IF @strNewPassword=N''
+	BEGIN
+		SET @strErrorDescribe=N'新帐号密码为空，不允许设置密码为空，请查证后再次尝试！'
+		RETURN 3
+	END
+
+	-- 修改密码
+	UPDATE AccountsInfo SET LogonPass=@strNewPassword WHERE UserID=@dwUserID
+
+	-- 修改密码记录
+	INSERT INTO   THRecordDB.dbo.RecordPasswdExpend(OperMasterID,UserID,ReLogonPasswd,ReInsurePasswd,ClientIP)
+	VALUES(0,@dwUserID,@strNewPassword,N'',@strClientIP)
+
+	-- 设置信息
+	IF @@ERROR=0 
+	BEGIN
+		SET @strErrorDescribe=N'帐号密码修改成功，请牢记您的新帐号密码！'
+	END
+
+END
+
+RETURN 0
+
+
+GSP_GP_ModifyInsurePassword	
+----------------------------------------------------------------------------------------------------
+
+-- 修改密码
+CREATE PROC GSP_GP_ModifyInsurePassword
+	@dwUserID INT,								-- 用户 I D
+	@strSrcPassword NCHAR(32),					-- 用户密码
+	@strNewPassword NCHAR(32),					-- 用户密码
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 变量定义
+	DECLARE @UserID INT
+	DECLARE @Nullity BIT
+	DECLARE @StunDown BIT
+	DECLARE @InsurePass AS NCHAR(32)
+
+	-- 查询用户
+	SELECT @UserID=UserID, @InsurePass=InsurePass, @Nullity=Nullity, @StunDown=StunDown
+	FROM AccountsInfo(NOLOCK) WHERE UserID=@dwUserID
+
+	-- 查询用户
+	IF @UserID IS NULL
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试！'
+		RETURN 1
+	END	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+
+	-- 帐号关闭
+	IF @StunDown<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号使用了安全关闭功能，必须重新开通后才能继续使用！'
+		RETURN 2
+	END	
+
+	-- 密码判断
+	IF @InsurePass = N'' 
+	BEGIN
+		SET @strErrorDescribe=N'抱歉，您还没有设置初始银行密码，请先开通银行功能！'
+		RETURN 3
+	END
+	
+	-- 密码判断
+	IF @InsurePass IS NOT NULL AND @InsurePass<>@strSrcPassword
+	BEGIN
+		SET @strErrorDescribe=N'您的密码输入有误，请查证后再次尝试！'
+		RETURN 3
+	END
+
+	-- 密码判断
+	IF @strNewPassword=N''
+	BEGIN
+		SET @strErrorDescribe=N'新帐号密码为空，不允许设置密码为空，请查证后再次尝试！'
+		RETURN 3
+	END
+
+	-- 修改密码
+	UPDATE AccountsInfo SET InsurePass=@strNewPassword WHERE UserID=@dwUserID
+
+	-- 修改密码记录
+	INSERT INTO   THRecordDB.dbo.RecordPasswdExpend(OperMasterID,UserID,ReLogonPasswd,ReInsurePasswd,ClientIP)
+	VALUES(0,@dwUserID,N'',@strNewPassword,@strClientIP)
+
+	-- 设置信息
+	IF @@ERROR=0 
+	BEGIN
+		SET @strErrorDescribe=N'保险柜密码修改成功，请牢记您的新保险柜密码！'
+	END
+
+	RETURN 0
+
+END
+
+RETURN 0
+
+
+GSP_GP_ModifyUnderWrite	
+----------------------------------------------------------------------------------------------------
+
+-- 修改签名
+CREATE PROC GSP_GP_ModifyUnderWrite
+	@dwUserID INT,								-- 用户 I D	
+	@strPassword NCHAR(32),						-- 用户密码
+	@strUnderWrite NVARCHAR(31),				-- 用户密码
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 查询信息
+	DECLARE @Password NCHAR(32)
+	SELECT @Password=LogonPass FROM AccountsInfo WHERE UserID=@dwUserID
+
+	-- 用户判断
+	IF @Password IS NULL
+	BEGIN 
+		SET @strErrorDescribe=N'用户信息不存在，机器绑定失败！'
+		RETURN 1
+	END
+
+	-- 密码判断
+	IF @Password<>@strPassword
+	BEGIN 
+		SET @strErrorDescribe=N'由于您提供的帐号密码不正确，个性签名修改失败！'
+		RETURN 3
+	END
+
+	-- 设置签名
+	UPDATE AccountsInfo SET UnderWrite=@strUnderWrite WHERE UserID=@dwUserID
+
+	-- 成功判断
+	IF @@ROWCOUNT=0
+	BEGIN
+		SET @strErrorDescribe=N'修改个性签名操作执行错误，请联系客户服务中心！'
+		RETURN 4
+	END
+
+	RETURN 0
+
+END
+
+
+GSP_GP_QueryUserIndividual	
+----------------------------------------------------------------------------------------------------
+
+-- 查询资料
+CREATE PROC GSP_GP_QueryUserIndividual
+	@dwUserID INT,								-- 用户 I D
+	@strPassword NCHAR(32),						-- 用户密码
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 变量定义
+	DECLARE @LogonPass AS NCHAR(32)
+	
+	DECLARE @NickName as NVARCHAR(31)
+	DECLARE @GameID as int
+	DECLARE @UserLevel AS INT
+	DECLARE @Experience AS INT
+	
+	-- 查询用户
+	SELECT @LogonPass=LogonPass,@NickName = NickName,@GameID = GameID, @Experience=Experience FROM AccountsInfo(NOLOCK) WHERE UserID=@dwUserID
+	select @UserLevel = count(LevelID) + 1 from THPlatformDB.dbo.GrowLevelConfig where Experience<=@Experience
+
+	-- 密码判断
+	--IF @LogonPass<>@strPassword
+	--BEGIN
+	--	SET @strErrorDescribe=N'您的用户密码不正确，个人信息查询失败！'
+	--	RETURN 1
+	--END
+
+	-- 变量定义
+	DECLARE @UserID INT
+	DECLARE @QQ NVARCHAR(16)
+	DECLARE @EMail NVARCHAR(33)
+	DECLARE @UserNote NVARCHAR(256)
+	DECLARE @SeatPhone NVARCHAR(32)
+	DECLARE @MobilePhone NVARCHAR(16)
+	DECLARE @Compellation NVARCHAR(16)
+	DECLARE @DwellingPlace NVARCHAR(128)
+	DECLARE @PassPortID NVARCHAR(18)
+	DECLARE	@Spreader NVARCHAR(31)
+	DECLARE @UnderWrite NVARCHAR(64)
+	DECLARE @WeChatURL NVARCHAR(256)
+	DECLARE @CustomData NVARCHAR(512)
+	
+	SET @QQ=N''	
+	SET @EMail=N''	
+	SET @UserNote=N''	
+	SET @SeatPhone=N''	
+	SET @MobilePhone=N''	
+	SET @Compellation=N''	
+	SET @DwellingPlace=N''	
+	SET @PassPortID=N''		
+	SET @Spreader=N''
+	SET @UnderWrite=N''
+	SET @WeChatURL=N''
+	SET @CustomData=N''
+
+	-- 查询用户
+	SELECT @UserID=UserID, @QQ=QQ, @EMail=EMail, @UserNote=UserNote, @SeatPhone=SeatPhone,@MobilePhone=MobilePhone, @DwellingPlace=DwellingPlace, @WeChatURL = WeChatURL ,@CustomData=CustomData
+	FROM IndividualDatum(NOLOCK) WHERE UserID=@dwUserID
+
+	-- 查询姓名
+	DECLARE @SpreaderID INT	
+	DECLARE @Gender INT
+	SELECT @Compellation=Compellation,@PassPortID = PassPortID,@SpreaderID = SpreaderID,@UnderWrite = UnderWrite,@Gender = Gender FROM AccountsInfo(NOLOCK) WHERE UserID=@dwUserID
+	
+	-- 查询推广
+	SELECT @Spreader = Accounts FROM AccountsInfo  WHERE UserID=@SpreaderID
+	
+	--查连胜
+	DECLARE @MaxWin int
+	select @MaxWin = MaxWin from THTreasureDB.dbo.RecordPlayStreakWin where @dwUserID = UserID
+	IF @MaxWin IS NULL
+	BEGIN 
+		SET @MaxWin = 0
+	END
+	
+	DECLARE @AllCount int
+	DECLARE @AllWin int
+	select @AllCount = count(WinCount) + count(LostCount) + count(DrawCount),@AllWin =count(WinCount) from THTreasureDB.dbo.RecordPlayTotalScore where @dwUserID = UserID
+	
+	
+	
+	-- 输出信息
+	SELECT @dwUserID AS UserID,
+	       @Compellation AS Compellation,
+	       @PassPortID AS PassPortID, 
+	       @UnderWrite AS UnderWrite,
+	       @WeChatURL AS WeChatURL,
+	       @QQ AS QQ, 
+	       @EMail AS EMail, 
+	       @SeatPhone AS SeatPhone,
+		   @MobilePhone AS MobilePhone,
+		   @DwellingPlace AS DwellingPlace, 
+		   @UserNote AS UserNote,
+		   @Spreader AS Spreader,
+		   @CustomData AS CustomData,
+		   @NickName as NickName,
+		   @GameID as GameID,
+		   @UserLevel AS UserLevel,
+	       @Experience AS Experience,
+		   @MaxWin AS MaxWin,
+		   @AllCount as AllCount,
+		   @AllWin as AllWin,
+		   @Gender AS Gender
+
+	RETURN 0
+
+END
+
+RETURN 0
+
+
+GSP_GP_ModifyUserIndividual	
+----------------------------------------------------------------------------------------------------
+
+-- 更新资料
+CREATE PROC GSP_GP_ModifyUserIndividual
+	@dwUserID INT,								-- 用户 I D
+	@strPassword NCHAR(32),						-- 用户密码
+	@cbGender TINYINT,							-- 用户性别
+	@strNickName NVARCHAR(32),					-- 用户昵称
+	@strUnderWrite NVARCHAR(63),				-- 个性签名
+	@strCompellation NVARCHAR(16),				-- 真实名字
+	@strPassPortID NVARCHAR(18),				-- 证件号码	
+	@strQQ NVARCHAR(16),						-- Q Q 号码
+	@strEMail NVARCHAR(33),						-- 电子邮电
+	@strSeatPhone NVARCHAR(32),					-- 固定电话
+	@strMobilePhone NVARCHAR(16),				-- 移动电话
+	@strDwellingPlace NVARCHAR(128),			-- 详细地址
+	@strUserNote NVARCHAR(256),					-- 用户备注	
+	@strSpreader NVARCHAR(31),					-- 推荐帐号	
+	@strWeChatURL NVARCHAR(256),				-- 微信URL	
+	@strCustomData NVARCHAR(512),					-- 自定义数据			
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 变量定义
+	DECLARE @UserID INT
+	DECLARE @NickName NVARCHAR(31)
+	DECLARE @WeChatURL NVARCHAR(256)
+	DECLARE @Nullity BIT
+	DECLARE @StunDown BIT
+	DECLARE @LogonPass AS NCHAR(32)
+	-- 金币变量
+	DECLARE @SourceScore BIGINT
+
+	-- 查询用户
+	SELECT @UserID=UserID, @NickName=NickName, @LogonPass=LogonPass, @Nullity=Nullity, @StunDown=StunDown
+	FROM AccountsInfo(NOLOCK) WHERE UserID=@dwUserID
+	
+	-- 查询URL
+	SELECT @WeChatURL=WeChatURL FROM IndividualDatum WHERE UserID=@dwUserID
+
+	-- 查询用户
+	IF @UserID IS NULL
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试！'
+		RETURN 1
+	END	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+
+	-- 帐号关闭
+	IF @StunDown<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号使用了安全关闭功能，必须重新开通后才能继续使用！'
+		RETURN 2
+	END	
+	
+	-- 密码判断
+	--IF @LogonPass<>@strPassword
+	--BEGIN
+	--	SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试登录！'
+	--	RETURN 3
+	--END
+
+	-- 效验昵称
+	IF (SELECT COUNT(*) FROM ConfineContent(NOLOCK) WHERE CHARINDEX(String,@strNickName)>0)>0
+	BEGIN
+		SET @strErrorDescribe=N'您所输入的游戏昵称名含有限制字符串，请更换昵称名后再次修改！'
+		RETURN 4
+	END
+
+	-- 存在判断
+	--IF EXISTS (SELECT UserID FROM AccountsInfo(NOLOCK) WHERE NickName=@strNickName AND UserID<>@dwUserID)
+	--BEGIN
+	--	SET @strErrorDescribe=N'此昵称已被其他玩家使用了，请更换昵称名后再次修改！'
+	--	RETURN 4
+	--END
+	
+	-- 查推广员
+	DECLARE @SpreaderID INT	
+	IF @strSpreader<>''
+	BEGIN
+		-- 查推广员
+		SELECT @SpreaderID=UserID FROM AccountsInfo(NOLOCK) WHERE Accounts=@strSpreader
+
+		-- 结果处理
+		IF @SpreaderID IS NULL
+		BEGIN
+			SET @SpreaderID=0
+			SET @strErrorDescribe=N'您所填写的推广员不存在或者填写错误，请检查后再提交！'
+			RETURN 5
+		END
+		
+		-- 查询重复
+		
+		IF EXISTS (SELECT SpreaderID FROM AccountsInfo WHERE @SpreaderID=SpreaderID and UserID=@dwUserID)
+		BEGIN
+			SET @SpreaderID=0
+			SET @strErrorDescribe=N'已经提交推广员，提交失败！'
+			RETURN 5
+		END
+		
+	END
+	ELSE SET @SpreaderID=0
+	
+	-- 推广提成
+	IF @SpreaderID<>0
+	BEGIN
+		DECLARE @RegisterGrantScore INT
+		DECLARE @Note NVARCHAR(512)
+		SET @Note = N'推广员'
+		SELECT @RegisterGrantScore = RegisterGrantScore FROM   THTreasureDB.dbo.GlobalSpreadInfo
+		IF @RegisterGrantScore IS NULL
+		BEGIN
+			SET @RegisterGrantScore=5000
+		END
+		INSERT INTO   THTreasureDB.dbo.RecordSpreadInfo(
+			UserID,Score,TypeID,ChildrenID,CollectNote)
+		VALUES(@SpreaderID,@RegisterGrantScore,1,@UserID,@Note)	
+		
+		-- 推荐记录
+		UPDATE AccountsInfo SET SpreaderID = @SpreaderID WHERE UserID=@dwUserID		
+	END
+	
+	
+	-- 修改资料
+	--UPDATE AccountsInfo SET NickName=@strNickName, UnderWrite=@strUnderWrite, Gender=@cbGender	WHERE UserID=@dwUserID	
+	UPDATE AccountsInfo SET UnderWrite=@strUnderWrite, Gender=@cbGender	WHERE UserID=@dwUserID	
+		
+	-- 修改昵称记录
+	IF @NickName<>@strNickName AND @strNickName<>''
+	BEGIN
+		INSERT INTO   THRecordDB.dbo.RecordAccountsExpend(UserID,ReAccounts,ClientIP)
+		VALUES(@dwUserID,@strNickName,@strClientIP)
+		
+		-- 修改昵称
+		UPDATE AccountsInfo SET NickName=@strNickName WHERE UserID=@dwUserID	
+	END
+	
+	-- 修改URL
+	IF @WeChatURL<>@strWeChatURL 
+GSP_GP_ModifyUserAppellation	
+----------------------------------------------------------------------------------------------------
+
+-- 更新资料
+CREATE PROC GSP_GP_ModifyUserAppellation
+	@dwUserID INT,								-- 用户 I D
+	@strDynamicPass NCHAR(32),					-- 用户密码
+	@dwAppellation INT,							-- 称谓 I D		
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 变量定义
+	DECLARE @UserID INT
+	DECLARE @NickName NVARCHAR(31)
+	DECLARE @Nullity BIT
+	DECLARE @StunDown BIT
+	DECLARE @LogonPass AS NCHAR(32)
+	DECLARE @DynamicPass AS NCHAR(32)
+	-- 金币变量
+	DECLARE @SourceScore BIGINT
+
+	-- 查询用户
+	SELECT @UserID=UserID, @NickName=NickName, @LogonPass=LogonPass,@DynamicPass = DynamicPass, @Nullity=Nullity, @StunDown=StunDown
+	FROM AccountsInfo(NOLOCK) WHERE UserID=@dwUserID
+
+	-- 查询用户
+	IF @UserID IS NULL
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试！'
+		RETURN 1
+	END	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+
+	-- 帐号关闭
+	IF @StunDown<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号使用了安全关闭功能，必须重新开通后才能继续使用！'
+		RETURN 2
+	END	
+	
+	-- 密码判断
+	IF @DynamicPass<>@strDynamicPass
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试登录！'
+		RETURN 3
+	END
+
+	-- 修改资料
+	UPDATE AccountsAppellation SET CurAppellation=@dwAppellation WHERE UserID=@dwUserID
+
+	-- 设置信息
+	IF @@ERROR=0 SET @strErrorDescribe=N'服务器已经接受了您的新资料！'
+
+	RETURN 0
+
+END
+
+RETURN 0
+
+
+GSP_GP_EfficacyAccounts	
+----------------------------------------------------------------------------------------------------
+
+-- 帐号登录
+CREATE PROC GSP_GP_EfficacyAccounts
+	@strAccounts NVARCHAR(31),					-- 用户帐号
+	@strPassword NCHAR(32),						-- 用户密码
+	@cbClientKind TINYINT,						-- 用户类型
+	@strServerName NVARCHAR(32),				-- 服务器名
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineID NVARCHAR(32),					-- 机器标识
+	@nNeeValidateMBCard BIT,					-- 密保校验
+	@strPassPortID NVARCHAR(19),				-- 证件校验
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 基本信息
+DECLARE @UserID INT
+DECLARE @CustomID INT
+DECLARE @FaceID SMALLINT
+DECLARE @Accounts NVARCHAR(31)
+DECLARE @NickName NVARCHAR(31)
+DECLARE @PlatformID TINYINT
+DECLARE @UserUin NVARCHAR(32)
+DECLARE @UnderWrite NVARCHAR(63)
+DECLARE @SpreaderID INT
+DECLARE @PlayTimeCount INT
+
+-- 财富变量
+DECLARE @Score BIGINT
+DECLARE @Ingot BIGINT
+DECLARE @Insure BIGINT
+DECLARE @Beans decimal(18, 2)
+DECLARE @RoomCardCount INT
+
+-- 扩展信息
+DECLARE @GameID INT
+DECLARE @Gender TINYINT
+DECLARE @UserMedal INT
+DECLARE @Experience INT
+DECLARE @LoveLiness INT
+DECLARE @MasterRight INT
+DECLARE @MemberOrder SMALLINT
+DECLARE @MemberOverDate DATETIME
+DECLARE @MemberSwitchDate DATETIME
+DECLARE @ProtectID INT
+DECLARE @PasswordID INT
+DECLARE @GameLogonTimes INT
+
+-- 辅助变量
+DECLARE @EnjoinLogon AS INT
+
+-- 执行逻辑
+BEGIN
+
+	-- 效验地址
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineAddress(NOLOCK) WHERE AddrString=@strClientIP AND (EnjoinOverDate>GETDATE() OR EnjoinOverDate IS NULL)
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您所在的 IP 地址的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 4
+	END
+	
+	-- 效验机器
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineMachine(NOLOCK) WHERE MachineSerial=@strMachineID AND (EnjoinOverDate>GETDATE() OR EnjoinOverDate IS NULL)
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您的机器的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 7
+	END
+ 
+	-- 查询用户
+	DECLARE @Nullity TINYINT
+	DECLARE @StunDown TINYINT
+	DECLARE @LogonPass AS NCHAR(32)
+	DECLARE @InsurePass AS NCHAR(32)
+	DECLARE	@MachineSerial NCHAR(32)
+	DECLARe @strLastLogonIP NCHAR(15)
+	DECLARE @MoorMachine AS TINYINT
+	DECLARE @MasterOrder AS TINYINT
+	SELECT @UserID=UserID, @GameID=GameID, @Accounts=Accounts, @NickName=NickName, @PlatformID=PlatformID, @UserUin=UserUin, @UnderWrite=UnderWrite, @LogonPass=LogonPass,@InsurePass=InsurePass,
+		@FaceID=FaceID, @CustomID=CustomID, @Gender=Gender, @Nullity=Nullity, @StunDown=StunDown, @UserMedal=UserMedal, @Experience=Experience,
+		@LoveLiness=LoveLiness,@MasterRight=MasterRight, @MemberOrder=MemberOrder, @MemberOverDate=MemberOverDate, @MemberSwitchDate=MemberSwitchDate,@strLastLogonIP=LastLogonIP,
+		@MoorMachine=MoorMachine,@MasterOrder=MasterOrder, @MachineSerial=LastLogonMachine,@SpreaderID=SpreaderID,@PlayTimeCount=PlayTimeCount,@PasswordID=PasswordID,@ProtectID=ProtectID
+	FROM AccountsInfo(NOLOCK) WHERE Accounts=@strAccounts
+		
+	-- 系统暂停
+	SELECT @EnjoinLogon=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0 and @MasterOrder = 0
+	BEGIN
+		SELECT @strErrorDescribe=StatusString FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+		RETURN 2
+	END
+
+	-- 查询用户
+	IF @UserID IS NULL
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试登录！'
+		RETURN 1
+	END	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+
+	-- 帐号关闭
+	IF @StunDown<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号使用了安全关闭功能，必须重新开通后才能继续使用！'
+		RETURN 2
+	END	
+	
+	-- 固定机器
+	IF @MoorMachine=1
+	BEGIN
+		IF @MachineSerial<>@strMachineID
+		BEGIN
+			SET @strErrorDescribe=N'您的帐号使用固定机器登录功能，您现所使用的机器不是所指定的机器！'
+			RETURN 1
+		END
+	END
+
+	-- 密码判断
+	IF @LogonPass<>@strPassword
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试登录！'
+		RETURN 3
+	END
+
+	-- 密保校验
+	IF @nNeeVali
+GSP_GP_EfficacyAccounts	dateMBCard=1 AND @PasswordID<>0
+	BEGIN
+		SELECT @PasswordID AS PasswordID
+		RETURN 18
+	END
+
+	-- 证件校验
+	IF @strLastLogonIP <> @strClientIP
+	BEGIN
+		DECLARE @RegisterPassPortID NVARCHAR(19)
+		SELECT @RegisterPassPortID=PassportID FROM AccountsProtect WHERE UserID=@UserID
+		IF @strPassPortID <> @RegisterPassPortID
+		BEGIN
+			IF @strPassPortID<>N''
+			BEGIN
+				SET @strErrorDescribe=N'您输入的身份证号码与您注册时填写的不一致！'		
+				RETURN 1		
+			END
+
+			RETURN 19
+		END				
+	END
+
+	-- 固定机器
+	IF @MoorMachine=2
+	BEGIN
+		SET @MoorMachine=1
+		SET @strErrorDescribe=N'您的帐号成功使用了固定机器登录功能！'
+		UPDATE AccountsInfo SET MoorMachine=@MoorMachine, LastLogonMachine=@strMachineID WHERE UserID=@UserID
+	END
+
+	-- 推广员提成
+	IF @SpreaderID<>0 
+	BEGIN
+		DECLARE @GrantTime	INT
+		DECLARE @GrantScore	BIGINT
+		DECLARE @Note NVARCHAR(512)
+		SET @Note = N'游戏时长达标一次性奖励'
+
+		SELECT @GrantTime=PlayTimeCount,@GrantScore=PlayTimeGrantScore FROM   THTreasureDB.dbo.GlobalSpreadInfo WHERE ID=1
+		IF @GrantTime IS NULL
+		BEGIN
+			SET @GrantTime = 108000 -- 30小时
+			SET @GrantScore = 200000
+		END	
+		
+		IF @GrantScore>0 AND @GrantTime>0 AND @PlayTimeCount>=@GrantTime
+		BEGIN
+			-- 获取提成信息
+			DECLARE @RecordID INT
+			SELECT @RecordID=RecordID FROM   THTreasureDB.dbo.RecordSpreadInfo
+			WHERE UserID = @SpreaderID AND ChildrenID = @UserID AND TypeID = 2
+			
+			IF @RecordID IS NULL
+			BEGIN
+				INSERT INTO   THTreasureDB.dbo.RecordSpreadInfo(
+					UserID,Score,TypeID,ChildrenID,CollectNote)
+				VALUES(@SpreaderID,@GrantScore,2,@UserID,@Note)	
+			END		
+		END
+	END
+
+	-- 查询金币
+	SELECT @Score=Score, @Ingot = Ingot,@Insure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID=@UserID
+
+	-- 查询游戏豆
+	SELECT @Beans=Currency FROM   THTreasureDB.dbo.UserCurrencyInfo WHERE UserID=@UserID		
+	
+	-- 查询房卡
+	SELECT @RoomCardCount = GoodsCount FROM THAccountsDB.dbo.AccountsPackage WHERE UserID=@UserID AND GoodsID = 110
+	
+	-- 数据调整
+	IF @Score IS NULL SET @Score=0
+	IF @Ingot IS NULL SET @Ingot=0
+	IF @Insure IS NULL SET @Insure=0
+	IF @Beans IS NULL SET @Beans=0
+	IF @RoomCardCount IS NULL SET @RoomCardCount=0
+
+	-- 会员等级
+	IF @MemberOrder<>0 AND GETDATE()>@MemberSwitchDate
+	BEGIN
+		DECLARE @UserRight INT	
+		SET @UserRight=0
+		
+		-- 删除会员
+		DELETE AccountsMember WHERE UserID=@UserID AND MemberOverDate<=GETDATE()
+
+		-- 搜索会员
+		SELECT @MemberOverDate=MAX(MemberOverDate), @MemberOrder=MAX(MemberOrder), @MemberSwitchDate=MIN(MemberOverDate)
+			FROM AccountsMember(NOLOCK) WHERE UserID=@UserID
+
+		-- 数据调整
+		IF @MemberOrder IS NULL 
+		BEGIN
+			SET @MemberOrder=0
+			SET @UserRight=512
+		END
+		IF @MemberOverDate IS NULL SET @MemberOverDate='1980-1-1'
+		IF @MemberSwitchDate IS NULL SET @MemberSwitchDate='1980-1-1'
+
+		-- 更新数据
+		UPDATE AccountsInfo SET MemberOrder=@MemberOrder, MemberOverDate=@MemberOverDate, MemberSwitchDate=@MemberSwitchDate,
+			UserRight=UserRight&~@UserRight WHERE UserID=@UserID
+	END
+
+	-- 更新信息
+	UPDATE AccountsInfo SET GameLogonTimes=GameLogonTimes+1,LastLogonDate=GETDATE(), LastLogonIP=@strClientIP,DynamicPassTime=GETDATE(),
+		DynamicPass=CONVERT(nvarchar(32),REPLACE(newid(),'-','')),LastLogonMachine=@strMachineID 
+	WHERE UserID=@UserID
+	
+	-- 更新信息
+	--UPDATE THAccountsDB.dbo.RecordPetRewards SET LastLogonTime=GETDATE() WHERE UserID=@UserID AND DateDiff(d,InsertTime,GetDate())=0
+	exec THPlatformDB.dbo.GSP_GP_PetUpdateDayLogon @UserID
+
+	-- 动态密码
+	DECLARE @szDynamicPass  nchar(32)
+	SELECT @szDynamicPass=DynamicPass FROM AccountsInfo WHERE UserID=@UserID
+
+	-- 记录日志
+	DECLARE @DateID INT
+	SET @DateID=CAST(CAST(GETDATE() AS FLOAT) AS INT)
+	UPDATE SystemStreamInfo SET GameLogonSuccess=GameLogonSuccess+1 WHERE DateID=@DateID
+	IF @@ROWCOUNT=0 INSERT SystemStreamInfo (DateID, GameLogonSuccess) VALUES (@DateID, 1)
+	
+	-- 进入记录
+	INSERT THAccountsDB.dbo.RecordUserInout (UserID,EnterTime,EnterClientKind, EnterClientIP, EnterMachine)
+	VALUES (@UserID, GETDATE(),@cbClientKind, @strClientIP, @strMachineID)
+
+	-- 记录标识
+	
+GSP_GP_EfficacyAccounts	DECLARE @InoutIndex BIGINT
+	SET @InoutIndex=SCOPE_IDENTITY()
+	
+	-- 更新记录
+	UPDATE THAccountsDB.dbo.AccountsOnlineStatus 
+	SET UserID=@UserID,ClientKind = @cbClientKind,ServerName=@strServerName, EnterID=@InoutIndex,EnterIP=@strClientIP, EnterMachine=@strMachineID
+	WHERE UserID=@UserID
+	
+	-- 插入记录
+	IF @@ROWCOUNT=0
+	BEGIN
+		INSERT INTO THAccountsDB.dbo.AccountsOnlineStatus(UserID,ClientKind, ServerName, EnterID, EnterIP, EnterMachine)
+		VALUES(@UserID,@cbClientKind, @strServerName, @InoutIndex, @strClientIP, @strMachineID)
+	END
+
+	-- 银行标识
+	DECLARE @InsureEnabled TINYINT
+	SET @InsureEnabled=0
+	IF @InsurePass <> '' SET @InsureEnabled=1
+	
+	-- 代理标识
+	DECLARE @IsAgent TINYINT
+	SET @IsAgent =0
+	IF EXISTS (SELECT * FROM AccountsAgent WHERE UserID=@UserID and Nullity=0) SET @IsAgent=1
+	
+	-- 登陆次数
+	SELECT @GameLogonTimes = GameLogonTimes FROM THAccountsDB.dbo.AccountsInfo WHERE UserID=@UserID
+	IF @GameLogonTimes IS NULL SET @GameLogonTimes = 0
+	
+	-- 输出变量
+	SELECT @UserID AS UserID, @GameID AS GameID, @Accounts AS Accounts, @NickName AS NickName,@szDynamicPass AS DynamicPass,
+		@UnderWrite AS UnderWrite,@FaceID AS FaceID, @CustomID AS CustomID, @Gender AS Gender, @Ingot AS Ingot, 
+		@Experience AS Experience, @Score AS Score, @Insure AS Insure, @Beans AS Beans, @RoomCardCount AS RoomCard, @LoveLiness AS LoveLiness, @MemberOrder AS MemberOrder, 
+		@MemberOverDate AS MemberOverDate, @MoorMachine AS MoorMachine,@MasterOrder AS MasterOrder,@MasterRight AS MasterRight, @PasswordID as PasswordID,
+		@InsureEnabled AS InsureEnabled, @PlatformID AS LogonMode,@IsAgent AS IsAgent, @InsurePass AS InsurePass,@InoutIndex AS InoutIndex,@strMachineID AS MachineID,
+		@GameLogonTimes AS GameLogonTimes
+END
+
+RETURN 0
+
+
+GSP_MB_EfficacyAccounts	
+----------------------------------------------------------------------------------------------------
+
+-- 帐号登录
+CREATE PROC GSP_MB_EfficacyAccounts
+	@strAccounts NVARCHAR(31),					-- 用户帐号
+	@strPassword NCHAR(32),						-- 用户密码
+	@cbClientKind TINYINT,						-- 用户类型
+	@strServerName NVARCHAR(32),				-- 服务器名
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineID NVARCHAR(32),					-- 机器标识
+	@strMobilePhone NVARCHAR(11),				-- 手机号码
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 基本信息
+DECLARE @UserID INT
+DECLARE @CustomID INT
+DECLARE @FaceID SMALLINT
+DECLARE @Accounts NVARCHAR(31)
+DECLARE @NickName NVARCHAR(31)
+DECLARE @PlatformID TINYINT
+DECLARE @UserUin NVARCHAR(32)
+DECLARE @UnderWrite NVARCHAR(63)
+DECLARE @SpreaderID INT
+DECLARE @PlayTimeCount INT
+
+-- 财富变量
+DECLARE @Score BIGINT
+DECLARE @Ingot BIGINT
+DECLARE @Insure BIGINT
+DECLARE @Beans decimal(18, 2)
+DECLARE @RoomCardCount INT
+
+-- 扩展信息
+DECLARE @GameID INT
+DECLARE @Gender TINYINT
+DECLARE @UserMedal INT
+DECLARE @Experience INT
+DECLARE @LoveLiness INT
+DECLARE @MasterRight INT
+DECLARE @MemberOrder SMALLINT
+DECLARE @MemberOverDate DATETIME
+DECLARE @MemberSwitchDate DATETIME
+DECLARE @GameLogonTimes INT
+
+
+-- 辅助变量
+DECLARE @EnjoinLogon AS INT
+
+-- 执行逻辑
+BEGIN
+	-- 系统暂停
+	SELECT @EnjoinLogon=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SELECT @strErrorDescribe=StatusString FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+		RETURN 2
+	END
+
+	-- 效验地址
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineAddress(NOLOCK) WHERE AddrString=@strClientIP AND GETDATE()<EnjoinOverDate
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您所在的 IP 地址的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 4
+	END
+	
+	-- 效验机器
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineMachine(NOLOCK) WHERE MachineSerial=@strMachineID AND GETDATE()<EnjoinOverDate
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您的机器的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 7
+	END
+
+	-- 查询用户
+	DECLARE @Nullity TINYINT
+	DECLARE @StunDown TINYINT
+	DECLARE @LogonPass AS NCHAR(32)
+	DECLARE @InsurePass AS NCHAR(32)
+	DECLARE	@MachineSerial NCHAR(32)
+	DECLARE @MoorMachine AS TINYINT
+	DECLARE @MasterOrder AS TINYINT
+	SELECT @UserID=UserID, @GameID=GameID, @Accounts=Accounts, @NickName=NickName, @PlatformID=PlatformID, @UserUin=UserUin, @UnderWrite=UnderWrite, @LogonPass=LogonPass,@InsurePass=InsurePass,
+		@FaceID=FaceID, @CustomID=CustomID, @Gender=Gender, @Nullity=Nullity, @StunDown=StunDown, @UserMedal=UserMedal, @Experience=Experience,
+		@LoveLiness=LoveLiness, @MemberOrder=MemberOrder, @MemberOverDate=MemberOverDate, @MemberSwitchDate=MemberSwitchDate,@MachineSerial=LastLogonMachine,
+		@MoorMachine=MoorMachine,@MasterOrder=MasterOrder,@MasterRight=MasterRight,@SpreaderID=SpreaderID,@PlayTimeCount=PlayTimeCount
+	FROM AccountsInfo(NOLOCK) WHERE Accounts=@strAccounts
+
+	-- 查询用户
+	IF @UserID IS NULL
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试登录！'
+		RETURN 1
+	END	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+
+	-- 帐号关闭
+	IF @StunDown<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号使用了安全关闭功能，必须重新开通后才能继续使用！'
+		RETURN 2
+	END	
+	
+	-- 固定机器
+	IF @MoorMachine=1
+	BEGIN
+		IF @MachineSerial<>@strMachineID
+		BEGIN
+			SET @strErrorDescribe=N'您的帐号使用固定机器登录功能，您现所使用的机器不是所指定的机器！'
+			RETURN 1
+		END
+	END
+	-- 密码判断
+	IF @LogonPass<>@strPassword
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试登录！'
+		RETURN 3
+	END
+
+	-- 推广员提成
+	IF @SpreaderID<>0 
+	BEGIN
+		DECLARE @GrantTime	INT
+		DECLARE @GrantScore	BIGINT
+		DECLARE @Note NVARCHAR(512)
+		SET @Note = N'游戏时长达标一次性奖励'
+
+		SELECT @GrantTime=PlayTimeCount,@GrantScore=PlayTimeGrantScore FROM   THTreasureDB.dbo.GlobalSpreadInfo
+		WHERE ID=1
+		IF @GrantTime IS NU
+GSP_MB_EfficacyAccounts	LL OR @GrantTime=0
+		BEGIN
+			SET @GrantTime = 108000 -- 30小时
+			SET @GrantScore = 200000
+		END			
+		IF @PlayTimeCount>=@GrantTime
+		BEGIN
+			-- 获取提成信息
+			DECLARE @RecordID INT
+			SELECT @RecordID=RecordID FROM   THTreasureDB.dbo.RecordSpreadInfo
+			WHERE UserID = @SpreaderID AND ChildrenID = @UserID AND TypeID = 2
+			IF @RecordID IS NULL
+			BEGIN
+				INSERT INTO   THTreasureDB.dbo.RecordSpreadInfo(
+					UserID,Score,TypeID,ChildrenID,CollectNote)
+				VALUES(@SpreaderID,@GrantScore,2,@UserID,@Note)	
+			END		
+		END
+	END
+
+	-- 查询金币
+	SELECT @Score=Score, @Ingot = Ingot,@Insure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID=@UserID
+
+	-- 查询游戏豆
+	SELECT @Beans=Currency FROM   THTreasureDB.dbo.UserCurrencyInfo WHERE UserID=@UserID		
+	
+	-- 查询房卡
+	SELECT @RoomCardCount = GoodsCount FROM THAccountsDB.dbo.AccountsPackage WHERE UserID=@UserID AND GoodsID = 110
+	
+	-- 数据调整
+	IF @Score IS NULL SET @Score=0
+	IF @Ingot IS NULL SET @Ingot=0
+	IF @Insure IS NULL SET @Insure=0
+	IF @Beans IS NULL SET @Beans=0
+	IF @RoomCardCount IS NULL SET @RoomCardCount=0
+
+	-- 会员等级
+	IF @MemberOrder<>0 AND GETDATE()>@MemberSwitchDate
+	BEGIN
+		DECLARE @UserRight INT	
+		SET @UserRight=0
+		
+		-- 删除会员
+		DELETE AccountsMember WHERE UserID=@UserID AND MemberOverDate<=GETDATE()
+
+		-- 搜索会员
+		SELECT @MemberOverDate=MAX(MemberOverDate), @MemberOrder=MAX(MemberOrder), @MemberSwitchDate=MIN(MemberOverDate)
+			FROM AccountsMember(NOLOCK) WHERE UserID=@UserID
+
+		-- 数据调整
+		IF @MemberOrder IS NULL 
+		BEGIN
+			SET @MemberOrder=0
+			SET @UserRight=512
+		END
+		IF @MemberOverDate IS NULL SET @MemberOverDate='1980-1-1'
+		IF @MemberSwitchDate IS NULL SET @MemberSwitchDate='1980-1-1'
+
+		-- 更新数据
+		UPDATE AccountsInfo SET MemberOrder=@MemberOrder, MemberOverDate=@MemberOverDate, MemberSwitchDate=@MemberSwitchDate,
+			UserRight=UserRight&~@UserRight WHERE UserID=@UserID
+	END
+
+	-- 更新信息
+	UPDATE AccountsInfo SET GameLogonTimes=GameLogonTimes+1, LastLogonDate=GETDATE(), LastLogonIP=@strClientIP,DynamicPassTime=GETDATE(),
+		DynamicPass=CONVERT(nvarchar(32),REPLACE(newid(),'-','')),LastLogonMachine=@strMachineID, LastLogonMobile=@strMobilePhone 
+	WHERE UserID=@UserID
+	
+	-- 更新信息
+	--UPDATE THAccountsDB.dbo.RecordPetRewards SET LastLogonTime=GETDATE() WHERE UserID=@UserID AND DateDiff(d,InsertTime,GetDate())=0
+	exec THPlatformDB.dbo.GSP_GP_PetUpdateDayLogon @UserID
+	
+	-- 动态密码
+	DECLARE @szDynamicPass  nchar(32)
+	SELECT @szDynamicPass=DynamicPass FROM AccountsInfo WHERE UserID=@UserID
+
+	-- 记录日志
+	DECLARE @DateID INT
+	SET @DateID=CAST(CAST(GETDATE() AS FLOAT) AS INT)
+	UPDATE SystemStreamInfo SET GameLogonSuccess=GameLogonSuccess+1 WHERE DateID=@DateID
+	IF @@ROWCOUNT=0 INSERT SystemStreamInfo (DateID, GameLogonSuccess) VALUES (@DateID, 1)
+	
+	-- 进入记录
+	INSERT THAccountsDB.dbo.RecordUserInout (UserID,EnterTime,EnterClientKind, EnterClientIP, EnterMachine)
+	VALUES (@UserID, GETDATE(),@cbClientKind, @strClientIP, @strMachineID)
+
+	-- 记录标识
+	DECLARE @InoutIndex BIGINT
+	SET @InoutIndex=SCOPE_IDENTITY()
+	
+	-- 更新记录
+	UPDATE THAccountsDB.dbo.AccountsOnlineStatus 
+	SET UserID=@UserID,ClientKind = @cbClientKind,ServerName=@strServerName, EnterID=@InoutIndex,EnterIP=@strClientIP, EnterMachine=@strMachineID
+	WHERE UserID=@UserID
+	
+	-- 插入记录
+	IF @@ROWCOUNT=0
+	BEGIN
+		INSERT INTO THAccountsDB.dbo.AccountsOnlineStatus(UserID,ClientKind, ServerName, EnterID, EnterIP, EnterMachine)
+		VALUES(@UserID,@cbClientKind, @strServerName, @InoutIndex, @strClientIP, @strMachineID)
+	END
+
+	-- 银行标识
+	DECLARE @InsureEnabled TINYINT
+	SET @InsureEnabled=0
+	IF @InsurePass <> '' SET @InsureEnabled=1
+	
+	-- 代理标识
+	DECLARE @IsAgent TINYINT
+	SET @IsAgent =0
+	IF EXISTS (SELECT * FROM AccountsAgent WHERE UserID=@UserID and Nullity=0) SET @IsAgent=1
+	
+	-- 登陆次数
+	SELECT @GameLogonTimes = GameLogonTimes FROM THAccountsDB.dbo.AccountsInfo WHERE UserID=@UserID
+	IF @GameLogonTimes IS NULL SET @GameLogonTimes = 0
+
+	-- 输出变量
+	SELECT @Us
+GSP_MB_EfficacyOtherPlatform	
+----------------------------------------------------------------------------------------------------
+
+-- 帐号登录-微信
+CREATE PROC GSP_MB_EfficacyOtherPlatform
+	@cbPlatformID TINYINT,						-- 平台编号
+	@strUserUin NVARCHAR(32),			        -- 用户Uin
+	@cbClientKind TINYINT,						-- 用户类型
+	@strServerName NVARCHAR(32),				-- 服务器名
+	@strNickName NVARCHAR(32),					-- 用户昵称
+	@strCompellation NVARCHAR(16),				-- 真实名字
+	@cbGender TINYINT,							-- 用户性别
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineID NVARCHAR(32),					-- 机器标识
+	@strMobilePhone NVARCHAR(11),				-- 手机号码
+	@strOpenID NVARCHAR(32),				-- OPENID
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 基本信息
+DECLARE @UserID INT
+DECLARE @CustomID INT
+DECLARE @FaceID SMALLINT
+DECLARE @Accounts NVARCHAR(31)
+DECLARE @NickName NVARCHAR(31)
+DECLARE @PlatformID TINYINT
+DECLARE @UserUin NVARCHAR(32)
+DECLARE @UnderWrite NVARCHAR(63)
+DECLARE @SpreaderID INT
+DECLARE @PlayTimeCount INT
+
+-- 积分变量
+DECLARE @Score BIGINT
+DECLARE @Ingot BIGINT
+DECLARE @Insure BIGINT
+DECLARE @Beans decimal(18, 2)
+DECLARE @RoomCardCount INT
+
+-- 局数信息
+DECLARE @WinCount INT
+DECLARE @LostCount INT
+DECLARE @DrawCount INT
+DECLARE @FleeCount INT
+
+
+-- 扩展信息
+DECLARE @GameID INT
+DECLARE @Gender TINYINT
+DECLARE @UserMedal INT
+DECLARE @Experience INT
+DECLARE @LoveLiness INT
+DECLARE @MasterRight INT
+DECLARE @MemberOrder SMALLINT
+DECLARE @MemberOverDate DATETIME
+DECLARE @MemberSwitchDate DATETIME
+DECLARE @GameLogonTimes INT
+
+
+-- 辅助变量
+DECLARE @EnjoinLogon AS INT
+
+-- 执行逻辑
+BEGIN
+
+	-- 系统暂停
+	SELECT @EnjoinLogon=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SELECT @strErrorDescribe=StatusString FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+		RETURN 2
+	END
+
+	-- 效验地址
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineAddress(NOLOCK) WHERE AddrString=@strClientIP AND GETDATE()<EnjoinOverDate
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您所在的 IP 地址的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 4
+	END
+	
+	-- 效验机器
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineMachine(NOLOCK) WHERE MachineSerial=@strMachineID AND GETDATE()<EnjoinOverDate
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您的机器的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 7
+	END
+
+	DECLARE @DateID INT
+	SET @DateID=CAST(CAST(GETDATE() AS FLOAT) AS INT)
+
+	-- 查询用户
+	DECLARE @Nullity TINYINT
+	DECLARE @StunDown TINYINT
+	DECLARE @LogonPass AS NCHAR(32)
+	DECLARE @InsurePass AS NCHAR(32)
+	DECLARE @MachineSerial AS NCHAR(32)
+	DECLARE @MoorMachine AS TINYINT
+	DECLARE @MasterOrder AS TINYINT
+	SELECT @UserID=UserID, @GameID=GameID, @Accounts=Accounts, @NickName=NickName, @PlatformID=PlatformID, @UserUin=UserUin, @UnderWrite=UnderWrite, @LogonPass=LogonPass,
+		@FaceID=FaceID, @CustomID=CustomID, @Gender=Gender, @Nullity=Nullity, @StunDown=StunDown, @UserMedal=UserMedal, @Experience=Experience,	@InsurePass=InsurePass,
+		@LoveLiness=LoveLiness, @MemberOrder=MemberOrder, @MemberOverDate=MemberOverDate, @MemberSwitchDate=MemberSwitchDate,@MachineSerial=LastLogonMachine,
+		@MoorMachine=MoorMachine,@MasterOrder=MasterOrder,@MasterRight=MasterRight,@SpreaderID=SpreaderID,@PlayTimeCount=PlayTimeCount
+	FROM AccountsInfo(NOLOCK) WHERE UserUin=@strUserUin AND PlatformID=@cbPlatformID
+
+    DECLARE @strTempName NVARCHAR(31)
+	-- 注册用户
+	IF @UserID IS NULL
+	BEGIN
+		-- 查询昵称
+		--IF EXISTS (SELECT UserID FROM AccountsInfo(NOLOCK) WHERE NickName=@strNickName)
+		--BEGIN
+		--	SET @strErrorDescribe=N'此昵称已被注册，请换另一昵称尝试再次注册！'
+		--	RETURN 30
+		--END
+		
+		-- 生成账号
+		DECLARE @strTemp NVARCHAR(31)
+		SET @strTemp=CONVERT(NVARCHAR(8),REPLACE(NEWID(),'-','_'))
+		
+		-- 查询账号
+		IF EXISTS (SELECT UserID FROM AccountsInfo(NOLOCK) WHERE Accounts=@strTemp)
+		BEGIN
+			SET @strErrorDescribe=N'随机账号被占用，请重试！'
+			RETURN 30
+		END
+		
+		-- 注册用
+GSP_MB_EfficacyOtherPlatform	户
+		INSERT AccountsInfo (Accounts,NickName,RegAccounts,PlatformID,UserUin,LogonPass,InsurePass,Gender,FaceID,
+			GameLogonTimes,LastLogonIP,LastLogonMobile,LastLogonMachine,RegisterIP,RegisterMobile,RegisterMachine)
+		VALUES (@strTemp,@strNickName,@strTemp,@cbPlatformID,@strUserUin,N'E10ADC3949BA59ABBE56E057F20F883E',N'E10ADC3949BA59ABBE56E057F20F883E',@cbGender,0,
+			1,@strClientIP,N'',@strMachineID,@strClientIP,N'',@strMachineID)
+		
+		
+		-- 记录日志
+		UPDATE SystemStreamInfo SET GameRegisterSuccess=GameRegisterSuccess+1 WHERE DateID=@DateID
+		IF @@ROWCOUNT=0 INSERT SystemStreamInfo (DateID, GameRegisterSuccess) VALUES (@DateID, 1)
+
+		-- 查询用户
+		SELECT @UserID=UserID, @GameID=GameID, @Accounts=Accounts, @NickName=NickName, @PlatformID=PlatformID, @UserUin=UserUin, @UnderWrite=UnderWrite, @LogonPass=LogonPass,
+			@FaceID=FaceID, @CustomID=CustomID, @Gender=Gender, @Nullity=Nullity, @StunDown=StunDown, @UserMedal=UserMedal, @Experience=Experience,
+			@LoveLiness=LoveLiness, @MemberOrder=MemberOrder, @MemberOverDate=MemberOverDate, @MemberSwitchDate=MemberSwitchDate,
+			@MoorMachine=MoorMachine,@MasterOrder=MasterOrder,@SpreaderID=SpreaderID,@PlayTimeCount=PlayTimeCount
+		FROM AccountsInfo(NOLOCK) WHERE UserUin=@strUserUin AND PlatformID=@cbPlatformID
+
+		-- 分配标识
+		SELECT @GameID=GameID FROM GameIdentifier(NOLOCK) WHERE UserID=@UserID
+		IF @GameID IS NULL 
+		BEGIN
+			SET @GameID=0
+			SET @strErrorDescribe=N'用户注册成功，但未成功获取游戏 ID 号码，系统稍后将给您分配！'
+		END
+		ELSE UPDATE AccountsInfo SET GameID=@GameID WHERE UserID=@UserID
+
+		----------------------------------------------------------------------------------------------------
+		----------------------------------------------------------------------------------------------------
+		-- 注册赠送
+
+		-- 读取变量
+		DECLARE @GrantIPCount AS BIGINT
+		DECLARE @GrantScoreCount AS BIGINT
+		DECLARE @GrantRoomCardCount AS BIGINT
+		SELECT @GrantIPCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'GrantIPCount'
+		SELECT @GrantScoreCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'GrantScoreCount'
+		SELECT @GrantRoomCardCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'GrantRoomCardCount'
+
+		-- 赠送限制
+		IF @GrantScoreCount IS NOT NULL AND @GrantScoreCount>0 AND @GrantIPCount IS NOT NULL AND @GrantIPCount>0
+		BEGIN
+			-- 赠送次数
+			DECLARE @GrantCount AS BIGINT
+			SELECT @GrantCount=GrantCount FROM SystemGrantCount(NOLOCK) WHERE DateID=@DateID AND RegisterIP=@strClientIP
+		
+			-- 次数判断
+			IF @GrantCount IS NOT NULL AND @GrantCount>=@GrantIPCount
+			BEGIN
+				SET @GrantScoreCount=0
+			END
+		END
+
+		-- 赠送金币
+		IF @GrantScoreCount IS NOT NULL AND @GrantScoreCount>0
+		BEGIN
+			-- 更新记录
+			UPDATE SystemGrantCount SET GrantScore=GrantScore+@GrantScoreCount, GrantCount=GrantCount+1 WHERE DateID=@DateID AND RegisterIP=@strClientIP
+
+			-- 插入记录
+			IF @@ROWCOUNT=0
+			BEGIN
+				INSERT SystemGrantCount (DateID, RegisterIP, RegisterMachine, GrantScore, GrantCount) VALUES (@DateID, @strClientIP, N'', @GrantScoreCount, 1)
+			END
+			
+			-- 查询金币
+			DECLARE @CurrScore BIGINT
+			DECLARE @CurrInsure BIGINT
+			DECLARE @CurrMedal INT
+			SELECT @CurrScore=Score,@CurrInsure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo  WHERE UserID=@UserID
+			SELECT @CurrMedal=UserMedal FROM AccountsInfo WHERE UserID=@UserID
+			
+			IF @CurrScore IS NULL SET @CurrScore=0
+			IF @CurrInsure IS NULL SET @CurrInsure=0
+			IF @CurrMedal IS NULL SET @CurrMedal=0	
+			
+			-- 赠送金币
+			INSERT   THTreasureDB.dbo.GameScoreInfo (UserID, Score, RegisterIP, LastLogonIP) VALUES (@UserID, @GrantScoreCount, @strClientIP, @strClientIP)
+			
+			-- 赠送房卡
+			INSERT   THAccountsDB.dbo.AccountsPackage (UserID, GoodsID, GoodShowID, GoodsSortID, GoodsCount, PushTime)
+			VALUES (@UserID, 110, 0, 0, @GrantRoomCardCount, GETDATE())
+			
+			-- 流水账
+			INSERT INTO   THTreasureDB.dbo.RecordPresentInfo(UserID,PreScore,PreInsureScore,PresentScore,TypeID,IPAddress,CollectDate)
+GSP_MB_EfficacyOtherPlatform	
+			VALUES (@UserID,@CurrScore,@CurrInsure,@GrantScoreCount,1,@strClientIP,GETDATE())	
+			
+			-- 日统计
+			UPDATE   THTreasureDB.dbo.StreamPresentInfo SET DateID=@DateID, PresentCount=PresentCount+1,PresentScore=PresentScore+@GrantScoreCount WHERE UserID=@UserID AND TypeID=1
+			IF @@ROWCOUNT=0
+			BEGIN
+				INSERT   THTreasureDB.dbo.StreamPresentInfo(DateID,UserID,TypeID,PresentCount,PresentScore) VALUES(@DateID,@UserID,1,1,@GrantScoreCount)
+			END				
+		END
+
+		----------------------------------------------------------------------------------------------------
+		----------------------------------------------------------------------------------------------------
+
+	END	
+	
+	--微信授权登录
+	DECLARE @BindUserID INT
+	SELECT @BindUserID = UserID FROM AccountsBind WHERE @strUserUin = unionid
+	IF @BindUserID IS NULL
+	BEGIN
+		INSERT AccountsBind(UserID,unionid,upperID) VALUES(@UserID, @strUserUin, -1)
+	END
+	ELSE IF @BindUserID = -1
+	BEGIN
+		UPDATE AccountsBind SET UserID = @UserID WHERE @strUserUin = unionid
+	END
+	
+	--ELSE
+	--BEGIN		
+	--    DECLARE @strRealNickName NVARCHAR(31)
+	--    SET @strRealNickName = SUBSTRING(@NickName,0,LEN(@NickName)-7)
+	--	-- 修改昵称
+	--	IF @strRealNickName<>@strNickName
+	--	BEGIN
+	--		-- 玩家账号
+			
+	--		SET @strTempName=@strNickName+CONVERT(nvarchar(8),REPLACE(newid(),'-',''))	
+				
+	--		-- 查询昵称
+	--		IF EXISTS (SELECT UserID FROM AccountsInfo(NOLOCK) WHERE NickName=@strTempName)
+	--		BEGIN
+	--			SET @strErrorDescribe=N'此昵称已被使用，请换另一昵称再次尝试登录！'
+	--			RETURN 30
+	--		END
+	--		ELSE
+	--		BEGIN
+	--			SET @NickName=@strTempName
+	--			UPDATE AccountsInfo SET NickName=@strTempName WHERE UserID=@UserID
+	--		END
+	--	END
+	--END
+	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+
+	-- 帐号关闭
+	IF @StunDown<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号使用了安全关闭功能，必须重新开通后才能继续使用！'
+		RETURN 2
+	END	
+	
+	-- 固定机器
+	IF @MoorMachine=1
+	BEGIN
+		IF @MachineSerial<>@strMachineID
+		BEGIN
+			SET @strErrorDescribe=N'您的帐号使用固定机器登录功能，您现所使用的机器不是所指定的机器！'
+			RETURN 1
+		END
+	END
+
+	-- 推广员提成
+	IF @SpreaderID<>0 
+	BEGIN
+		DECLARE @GrantTime	INT
+		DECLARE @GrantScore	BIGINT
+		DECLARE @Note NVARCHAR(512)
+		SET @Note = N'游戏时长达标一次性奖励'
+
+		SELECT @GrantTime=PlayTimeCount,@GrantScore=PlayTimeGrantScore FROM   THTreasureDB.dbo.GlobalSpreadInfo
+		WHERE ID=1
+		IF @GrantTime IS NULL OR @GrantTime=0
+		BEGIN
+			SET @GrantTime = 108000 -- 30小时
+			SET @GrantScore = 200000
+		END			
+		IF @PlayTimeCount>=@GrantTime
+		BEGIN
+			-- 获取提成信息
+			DECLARE @RecordID INT
+			SELECT @RecordID=RecordID FROM   THTreasureDB.dbo.RecordSpreadInfo
+			WHERE UserID = @SpreaderID AND ChildrenID = @UserID AND TypeID = 2
+			IF @RecordID IS NULL
+			BEGIN
+				INSERT INTO   THTreasureDB.dbo.RecordSpreadInfo(
+					UserID,Score,TypeID,ChildrenID,CollectNote)
+				VALUES(@SpreaderID,@GrantScore,2,@UserID,@Note)	
+			END		
+		END
+	END
+
+	-- 查询金币
+	SELECT @Score=Score, @Ingot = Ingot,@Insure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID=@UserID
+	
+	-- 查询游戏豆
+	SELECT @Beans=Currency FROM   THTreasureDB.dbo.UserCurrencyInfo WHERE UserID=@UserID		
+	
+	-- 查询房卡
+	SELECT @RoomCardCount = GoodsCount FROM THAccountsDB.dbo.AccountsPackage WHERE UserID=@UserID AND GoodsID = 110
+
+	
+	-- 局数信息
+	SELECT @WinCount=WinCount, @LostCount=LostCount, @DrawCount=DrawCount,@FleeCount=FleeCount
+	FROM THTreasureDB.dbo.GameScoreInfo WHERE UserID=@UserID
+	
+	-- 数据调整
+	IF @WinCount IS NULL SET @WinCount=0
+	IF @LostCount IS NULL SET @LostCount=0
+	IF @DrawCount IS NULL SET @DrawCount=0
+	IF @FleeCount IS NULL SET @FleeCount=0
+	
+	-- 数据调整
+	IF @Score IS NULL SET @Score=0
+	IF @Ingot IS NULL SET @Ingot=0
+	IF @Insure IS NULL SET @Insure=0
+	IF @Beans IS NULL SET @Beans=0
+	IF @RoomCardCount IS NULL SET @RoomCardCount=0
+
+	-- 会员等级
+	IF @MemberOrder<>0 AND GETDATE()>@MemberSwitchDate
+	BEGIN
+		DECLARE @UserRight INT	
+		SET @UserRight=0
+		
+		-- 删除会员
+		DELETE AccountsMe
+GSP_MB_EfficacyOtherPlatform	mber WHERE UserID=@UserID AND MemberOverDate<=GETDATE()
+
+		-- 搜索会员
+		SELECT @MemberOverDate=MAX(MemberOverDate), @MemberOrder=MAX(MemberOrder), @MemberSwitchDate=MIN(MemberOverDate)
+			FROM AccountsMember(NOLOCK) WHERE UserID=@UserID
+
+		-- 数据调整
+		IF @MemberOrder IS NULL 
+		BEGIN
+			SET @MemberOrder=0
+			SET @UserRight=512
+		END
+		IF @MemberOverDate IS NULL SET @MemberOverDate='1980-1-1'
+		IF @MemberSwitchDate IS NULL SET @MemberSwitchDate='1980-1-1'
+
+		-- 更新数据
+		UPDATE AccountsInfo SET MemberOrder=@MemberOrder, MemberOverDate=@MemberOverDate, MemberSwitchDate=@MemberSwitchDate,
+			UserRight=UserRight&~@UserRight WHERE UserID=@UserID
+	END
+
+	-- 更新信息
+	UPDATE AccountsInfo SET GameLogonTimes=GameLogonTimes+1, LastLogonDate=GETDATE(), LastLogonIP=@strClientIP,DynamicPassTime=GETDATE(),
+		DynamicPass=CONVERT(nvarchar(32),REPLACE(newid(),'-','')),LastLogonMachine=@strMachineID, LastLogonMobile=@strMobilePhone 
+	WHERE UserID=@UserID
+
+	-- 更新信息
+	--UPDATE THAccountsDB.dbo.RecordPetRewards SET LastLogonTime=GETDATE() WHERE UserID=@UserID AND DateDiff(d,InsertTime,GetDate())=0
+	exec THPlatformDB.dbo.GSP_GP_PetUpdateDayLogon @UserID
+	
+	-- 记录日志
+	UPDATE SystemStreamInfo SET GameLogonSuccess=GameLogonSuccess+1 WHERE DateID=@DateID
+	IF @@ROWCOUNT=0 INSERT SystemStreamInfo (DateID, GameLogonSuccess) VALUES (@DateID, 1)
+
+	-- 动态密码
+	DECLARE @szDynamicPass  nchar(32)
+	SELECT @szDynamicPass=DynamicPass FROM AccountsInfo WHERE UserID=@UserID
+	
+	-- 进入记录
+	INSERT THAccountsDB.dbo.RecordUserInout (UserID,EnterTime,EnterClientKind, EnterClientIP, EnterMachine)
+	VALUES (@UserID, GETDATE(),@cbClientKind, @strClientIP, @strMachineID)
+
+	-- 记录标识
+	DECLARE @InoutIndex BIGINT
+	SET @InoutIndex=SCOPE_IDENTITY()
+	
+	-- 更新记录
+	--UPDATE THAccountsDB.dbo.AccountsOnlineStatus 
+	--SET UserID=@UserID,ClientKind = @cbClientKind,ServerName=@strServerName, EnterID=@InoutIndex,EnterIP=@strClientIP, EnterMachine=@strMachineID
+	--WHERE UserID=@UserID
+	
+	---- 插入记录
+	--IF @@ROWCOUNT=0
+	--BEGIN
+	--	INSERT INTO THAccountsDB.dbo.AccountsOnlineStatus(UserID,ClientKind, ServerName, EnterID, EnterIP, EnterMachine)
+	--	VALUES(@UserID,@cbClientKind, @strServerName, @InoutIndex, @strClientIP, @strMachineID)
+	--END
+
+	-- 银行标识
+	DECLARE @InsureEnabled TINYINT
+	SET @InsureEnabled=0
+	IF @InsurePass <> '' SET @InsureEnabled=1
+	
+	-- 代理标识
+	DECLARE @IsAgent TINYINT
+	SET @IsAgent =0
+	IF EXISTS (SELECT * FROM AccountsAgent WHERE UserID=@UserID and Nullity=0) SET @IsAgent=1
+	
+	-- 登陆次数
+	SELECT @GameLogonTimes = GameLogonTimes FROM THAccountsDB.dbo.AccountsInfo WHERE UserID=@UserID
+	IF @GameLogonTimes IS NULL SET @GameLogonTimes = 0
+
+	-- 输出变量
+	SELECT @UserID AS UserID, @GameID AS GameID, @Accounts AS Accounts, @NickName AS NickName,@szDynamicPass AS DynamicPass,
+		@UnderWrite AS UnderWrite,@FaceID AS FaceID, @CustomID AS CustomID, @Gender AS Gender, @Ingot AS Ingot, 
+		@Experience AS Experience,@Score AS Score, @Insure AS Insure, @Beans AS Beans, @RoomCardCount AS RoomCard,
+		@WinCount AS WinCount,@LostCount AS LostCount, @DrawCount AS DrawCount, @FleeCount AS FleeCount,
+		@LoveLiness AS LoveLiness, @MemberOrder AS MemberOrder, 
+		@MemberOverDate AS MemberOverDate,@MoorMachine AS MoorMachine,@MasterOrder AS MasterOrder,@MasterRight AS MasterRight, @InsureEnabled AS InsureEnabled,
+		@PlatformID AS LogonMode,@IsAgent AS IsAgent, @InsurePass AS InsurePass,@InoutIndex AS InoutIndex,@strMachineID AS MachineID,
+		@GameLogonTimes AS GameLogonTimes
+END
+
+RETURN 0
+
+
+GSP_GP_EfficacyLogonVisitor	
+----------------------------------------------------------------------------------------------------
+
+-- 游客登录
+CREATE PROC GSP_GP_EfficacyLogonVisitor
+	@cbLogonMode TINYINT,						-- 登陆方式
+	@cbClientKind TINYINT,						-- 用户类型
+	@strServerName NVARCHAR(32),				-- 服务器名
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineID NVARCHAR(32),					-- 机器标识
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 基本信息
+DECLARE @UserID INT
+DECLARE @CustomID INT
+DECLARE @FaceID SMALLINT
+DECLARE @Accounts NVARCHAR(31)
+DECLARE @NickName NVARCHAR(31)
+DECLARE @PlatformID TINYINT
+DECLARE @UserUin NVARCHAR(32)
+DECLARE @UnderWrite NVARCHAR(63)
+DECLARE @SpreaderID INT
+DECLARE @PlayTimeCount INT
+
+-- 积分变量
+DECLARE @Score BIGINT
+DECLARE @Ingot BIGINT
+DECLARE @Insure BIGINT
+DECLARE @Beans decimal(18, 2)
+DECLARE @RoomCardCount INT
+
+-- 扩展信息
+DECLARE @GameID INT
+DECLARE @Gender TINYINT
+DECLARE @UserMedal INT
+DECLARE @Experience INT
+DECLARE @LoveLiness INT
+DECLARE @MasterRight INT
+DECLARE @MemberOrder SMALLINT
+DECLARE @MemberOverDate DATETIME
+DECLARE @MemberSwitchDate DATETIME
+DECLARE @GameLogonTimes INT
+
+
+-- 辅助变量
+DECLARE @EnjoinLogon AS INT
+
+-- 执行逻辑
+BEGIN
+
+	-- 系统暂停
+	SELECT @EnjoinLogon=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SELECT @strErrorDescribe=StatusString FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+		RETURN 2
+	END
+
+	-- 效验地址
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineAddress(NOLOCK) WHERE AddrString=@strClientIP AND GETDATE()<EnjoinOverDate
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您所在的 IP 地址的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 4
+	END
+	
+	-- 效验机器
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineMachine(NOLOCK) WHERE MachineSerial=@strMachineID AND GETDATE()<EnjoinOverDate
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您的机器的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 7
+	END
+
+	DECLARE @DateID INT
+	SET @DateID=CAST(CAST(GETDATE() AS FLOAT) AS INT)
+
+	-- 查询用户
+	DECLARE @Nullity TINYINT
+	DECLARE @StunDown TINYINT
+	DECLARE @LogonPass AS NCHAR(32)
+	DECLARE @InsurePass AS NCHAR(32)
+	DECLARE @MachineSerial AS NCHAR(32)
+	DECLARE @MoorMachine AS TINYINT
+	DECLARE @MasterOrder AS TINYINT
+	SELECT @UserID=UserID, @GameID=GameID, @Accounts=Accounts, @NickName=NickName, @PlatformID=PlatformID, @UserUin=UserUin, @UnderWrite=UnderWrite, @LogonPass=LogonPass,
+		@FaceID=FaceID, @CustomID=CustomID, @Gender=Gender, @Nullity=Nullity, @StunDown=StunDown, @UserMedal=UserMedal, @Experience=Experience,	@InsurePass=InsurePass,
+		@LoveLiness=LoveLiness, @MemberOrder=MemberOrder, @MemberOverDate=MemberOverDate, @MemberSwitchDate=MemberSwitchDate,@MachineSerial=LastLogonMachine,
+		@MoorMachine=MoorMachine,@MasterOrder=MasterOrder,@MasterRight=MasterRight,@SpreaderID=SpreaderID,@PlayTimeCount=PlayTimeCount
+	FROM AccountsInfo(NOLOCK) WHERE RegisterMachine=@strMachineID AND PlatformID=@cbLogonMode
+
+	-- 注册用户
+	IF @UserID IS NULL
+	BEGIN	
+
+		-- 临时账号
+		DECLARE @strTemp NVARCHAR(31)
+		SET @strTemp=CONVERT(NVARCHAR(31),REPLACE(NEWID(),'-','_'))
+		
+		-- 注册用户
+		INSERT AccountsInfo (Accounts,NickName,RegAccounts,PlatformID,UserUin,LogonPass,InsurePass,Gender,FaceID,
+			GameLogonTimes,LastLogonIP,LastLogonMobile,LastLogonMachine,RegisterIP,RegisterMobile,RegisterMachine)
+		VALUES (@strTemp,@strTemp,@strTemp,@cbLogonMode,@strMachineID,N'21218CCA77804D2BA1922C33E0151105',N'21218CCA77804D2BA1922C33E0151105',0,0,
+			1,@strClientIP,N'',@strMachineID,@strClientIP,N'',@strMachineID)
+
+		-- 玩家账号
+		DECLARE @MaxUserID INT
+		SELECT @MaxUserID=SCOPE_IDENTITY()
+		DECLARE @strTempName NVARCHAR(31)
+		SET @strTempName=N'游客'+CONVERT(NVARCHAR(31),@MaxUserID)
+		
+		--更新账号昵称
+		UPDATE AccountsInfo SET Accounts=@strTempName,NickName=@strTempName,RegAccounts=@strTempName WHERE UserID=@MaxUserID
+
+		-
+GSP_GP_EfficacyLogonVisitor	- 记录日志
+		UPDATE SystemStreamInfo SET GameRegisterSuccess=GameRegisterSuccess+1 WHERE DateID=@DateID
+		IF @@ROWCOUNT=0 INSERT SystemStreamInfo (DateID, GameRegisterSuccess) VALUES (@DateID, 1)
+
+		-- 查询用户
+		SELECT @UserID=UserID, @GameID=GameID, @Accounts=Accounts, @NickName=NickName, @UserUin=UserUin, @UnderWrite=UnderWrite, @LogonPass=LogonPass,
+			@FaceID=FaceID, @CustomID=CustomID, @Gender=Gender, @Nullity=Nullity, @StunDown=StunDown, @UserMedal=UserMedal, @Experience=Experience,
+			@LoveLiness=LoveLiness, @MemberOrder=MemberOrder, @MemberOverDate=MemberOverDate, @MemberSwitchDate=MemberSwitchDate,
+			@MoorMachine=MoorMachine,@MasterOrder=MasterOrder,@SpreaderID=SpreaderID,@PlayTimeCount=PlayTimeCount
+		FROM AccountsInfo(NOLOCK) WHERE RegisterMachine=@strMachineID AND PlatformID=@cbLogonMode
+
+		-- 分配标识
+		SELECT @GameID=GameID FROM GameIdentifier(NOLOCK) WHERE UserID=@UserID
+		IF @GameID IS NULL 
+		BEGIN
+			SET @GameID=0
+			SET @strErrorDescribe=N'用户注册成功，但未成功获取游戏 ID 号码，系统稍后将给您分配！'
+		END
+		ELSE UPDATE AccountsInfo SET GameID=@GameID WHERE UserID=@UserID
+
+--		----------------------------------------------------------------------------------------------------
+--		----------------------------------------------------------------------------------------------------
+--		-- 注册赠送
+--
+--		-- 读取变量
+--		DECLARE @GrantIPCount AS BIGINT
+--		DECLARE @GrantScoreCount AS BIGINT
+--		SELECT @GrantIPCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'GrantIPCount'
+--		SELECT @GrantScoreCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'GrantScoreCount'
+--
+--		-- 赠送限制
+--		IF @GrantScoreCount IS NOT NULL AND @GrantScoreCount>0 AND @GrantIPCount IS NOT NULL AND @GrantIPCount>0
+--		BEGIN
+--			-- 赠送次数
+--			DECLARE @GrantCount AS BIGINT
+--			SELECT @GrantCount=GrantCount FROM SystemGrantCount(NOLOCK) WHERE DateID=@DateID AND RegisterIP=@strClientIP
+--		
+--			-- 次数判断
+--			IF @GrantCount IS NOT NULL AND @GrantCount>=@GrantIPCount
+--			BEGIN
+--				SET @GrantScoreCount=0
+--			END
+--		END
+--
+--		-- 赠送金币
+--		IF @GrantScoreCount IS NOT NULL AND @GrantScoreCount>0
+--		BEGIN
+--			-- 更新记录
+--			UPDATE SystemGrantCount SET GrantScore=GrantScore+@GrantScoreCount, GrantCount=GrantCount+1 WHERE DateID=@DateID AND RegisterIP=@strClientIP
+--
+--			-- 插入记录
+--			IF @@ROWCOUNT=0
+--			BEGIN
+--				INSERT SystemGrantCount (DateID, RegisterIP, RegisterMachine, GrantScore, GrantCount) VALUES (@DateID, @strClientIP, N'', @GrantScoreCount, 1)
+--			END
+--
+--			-- 赠送金币
+--			INSERT   THTreasureDB.dbo.GameScoreInfo (UserID, Score, RegisterIP, LastLogonIP) VALUES (@UserID, @GrantScoreCount, @strClientIP, @strClientIP) 
+--		END
+--
+--		----------------------------------------------------------------------------------------------------
+--		----------------------------------------------------------------------------------------------------
+
+	END	
+	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+
+	-- 帐号关闭
+	IF @StunDown<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号使用了安全关闭功能，必须重新开通后才能继续使用！'
+		RETURN 2
+	END	
+	
+	-- 固定机器
+	IF @MoorMachine=1
+	BEGIN
+		IF @MachineSerial<>@strMachineID
+		BEGIN
+			SET @strErrorDescribe=N'您的帐号使用固定机器登录功能，您现所使用的机器不是所指定的机器！'
+			RETURN 1
+		END
+	END
+
+	-- 推广员提成
+	IF @SpreaderID<>0 
+	BEGIN
+		DECLARE @GrantTime	INT
+		DECLARE @GrantScore	BIGINT
+		DECLARE @Note NVARCHAR(512)
+		SET @Note = N'游戏时长达标一次性奖励'
+
+		SELECT @GrantTime=PlayTimeCount,@GrantScore=PlayTimeGrantScore FROM   THTreasureDB.dbo.GlobalSpreadInfo
+		WHERE ID=1
+		IF @GrantTime IS NULL OR @GrantTime=0
+		BEGIN
+			SET @GrantTime = 108000 -- 30小时
+			SET @GrantScore = 200000
+		END			
+		IF @PlayTimeCount>=@GrantTime
+		BEGIN
+			-- 获取提成信息
+			DECLARE @RecordID INT
+			SELECT @RecordID=RecordID FROM   THTreasureDB.dbo.RecordSpreadInfo
+			WHERE UserID = @SpreaderID AND ChildrenID = @UserID AND TypeID = 2
+			IF @RecordID IS NULL
+			BEGIN
+GSP_GP_EfficacyLogonVisitor	
+				INSERT INTO   THTreasureDB.dbo.RecordSpreadInfo(
+					UserID,Score,TypeID,ChildrenID,CollectNote)
+				VALUES(@SpreaderID,@GrantScore,2,@UserID,@Note)	
+			END		
+		END
+	END
+
+	-- 查询金币
+	SELECT @Score=Score, @Ingot = Ingot,@Insure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID=@UserID
+	
+	-- 查询游戏豆
+	SELECT @Beans=Currency FROM   THTreasureDB.dbo.UserCurrencyInfo WHERE UserID=@UserID		
+	
+	-- 查询房卡
+	SELECT @RoomCardCount = GoodsCount FROM THAccountsDB.dbo.AccountsPackage WHERE UserID=@UserID AND GoodsID = 110
+
+	-- 数据调整
+	IF @Score IS NULL SET @Score=0
+	IF @Ingot IS NULL SET @Ingot=0
+	IF @Insure IS NULL SET @Insure=0
+	IF @Beans IS NULL SET @Beans=0
+	IF @RoomCardCount IS NULL SET @RoomCardCount=0
+
+	-- 会员等级
+	IF @MemberOrder<>0 AND GETDATE()>@MemberSwitchDate
+	BEGIN
+		DECLARE @UserRight INT	
+		SET @UserRight=0
+		
+		-- 删除会员
+		DELETE AccountsMember WHERE UserID=@UserID AND MemberOverDate<=GETDATE()
+
+		-- 搜索会员
+		SELECT @MemberOverDate=MAX(MemberOverDate), @MemberOrder=MAX(MemberOrder), @MemberSwitchDate=MIN(MemberOverDate)
+			FROM AccountsMember(NOLOCK) WHERE UserID=@UserID
+
+		-- 数据调整
+		IF @MemberOrder IS NULL 
+		BEGIN
+			SET @MemberOrder=0
+			SET @UserRight=512
+		END
+		IF @MemberOverDate IS NULL SET @MemberOverDate='1980-1-1'
+		IF @MemberSwitchDate IS NULL SET @MemberSwitchDate='1980-1-1'
+
+		-- 更新数据
+		UPDATE AccountsInfo SET MemberOrder=@MemberOrder, MemberOverDate=@MemberOverDate, MemberSwitchDate=@MemberSwitchDate,
+			UserRight=UserRight&~@UserRight WHERE UserID=@UserID
+	END
+
+	-- 更新信息
+	UPDATE AccountsInfo SET GameLogonTimes=GameLogonTimes+1, LastLogonDate=GETDATE(), LastLogonIP=@strClientIP,DynamicPassTime=GETDATE(),
+		DynamicPass=CONVERT(nvarchar(32),REPLACE(newid(),'-','')),LastLogonMachine=@strMachineID
+	WHERE UserID=@UserID
+	
+	-- 更新信息
+	--UPDATE THAccountsDB.dbo.RecordPetRewards SET LastLogonTime=GETDATE() WHERE UserID=@UserID AND DateDiff(d,InsertTime,GetDate())=0
+	exec THPlatformDB.dbo.GSP_GP_PetUpdateDayLogon @UserID
+	
+	-- 记录日志
+	UPDATE SystemStreamInfo SET GameLogonSuccess=GameLogonSuccess+1 WHERE DateID=@DateID
+	IF @@ROWCOUNT=0 INSERT SystemStreamInfo (DateID, GameLogonSuccess) VALUES (@DateID, 1)
+
+	-- 动态密码
+	DECLARE @szDynamicPass  nchar(32)
+	SELECT @szDynamicPass=DynamicPass FROM AccountsInfo WHERE UserID=@UserID
+	
+	-- 进入记录
+	INSERT THAccountsDB.dbo.RecordUserInout (UserID,EnterTime,EnterClientKind, EnterClientIP, EnterMachine)
+	VALUES (@UserID, GETDATE(),@cbClientKind, @strClientIP, @strMachineID)
+
+	-- 记录标识
+	DECLARE @InoutIndex BIGINT
+	SET @InoutIndex=SCOPE_IDENTITY()
+	
+	-- 更新记录
+	UPDATE THAccountsDB.dbo.AccountsOnlineStatus 
+	SET UserID=@UserID,ClientKind = @cbClientKind,ServerName=@strServerName, EnterID=@InoutIndex,EnterIP=@strClientIP, EnterMachine=@strMachineID
+	WHERE UserID=@UserID
+	
+	-- 插入记录
+	IF @@ROWCOUNT=0
+	BEGIN
+		INSERT INTO THAccountsDB.dbo.AccountsOnlineStatus(UserID,ClientKind, ServerName, EnterID, EnterIP, EnterMachine)
+		VALUES(@UserID,@cbClientKind, @strServerName, @InoutIndex, @strClientIP, @strMachineID)
+	END
+
+	-- 银行标识
+	DECLARE @InsureEnabled TINYINT
+	SET @InsureEnabled=0
+	IF @InsurePass <> '' SET @InsureEnabled=1
+	
+	-- 代理标识
+	DECLARE @IsAgent TINYINT
+	SET @IsAgent =0
+	IF EXISTS (SELECT * FROM AccountsAgent WHERE UserID=@UserID and Nullity=0) SET @IsAgent=1
+	
+	-- 登陆次数
+	SELECT @GameLogonTimes = GameLogonTimes FROM THAccountsDB.dbo.AccountsInfo WHERE UserID=@UserID
+	IF @GameLogonTimes IS NULL SET @GameLogonTimes = 0
+
+	-- 输出变量
+	SELECT @UserID AS UserID, @GameID AS GameID, @Accounts AS Accounts, @NickName AS NickName,@szDynamicPass AS DynamicPass,
+		@UnderWrite AS UnderWrite,@FaceID AS FaceID, @CustomID AS CustomID, @Gender AS Gender, @Ingot AS Ingot, 
+		@Experience AS Experience,@Score AS Score, @Insure AS Insure, @Beans AS Beans, @RoomCardCount AS RoomCard, @LoveLiness AS LoveLiness, @MemberOrder AS MemberOrder, 
+		@MemberOverDate AS MemberOverDate,@MoorMachine AS MoorMachine,@MasterOrder AS Mas
+GSP_MB_EfficacyLogonVisitor	
+----------------------------------------------------------------------------------------------------
+
+-- 游客登录 --在用
+CREATE PROC GSP_MB_EfficacyLogonVisitor
+	@cbLogonMode TINYINT,						-- 登陆方式
+	@cbClientKind TINYINT,						-- 用户类型
+	@strServerName NVARCHAR(32),				-- 服务器名
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineID NVARCHAR(32),					-- 机器标识
+	@strMobilePhone NVARCHAR(11),				-- 手机号码
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 基本信息
+DECLARE @UserID INT
+DECLARE @CustomID INT
+DECLARE @FaceID SMALLINT
+DECLARE @Accounts NVARCHAR(31)
+DECLARE @NickName NVARCHAR(31)
+DECLARE @PlatformID TINYINT
+DECLARE @UserUin NVARCHAR(32)
+DECLARE @UnderWrite NVARCHAR(63)
+DECLARE @SpreaderID INT
+DECLARE @PlayTimeCount INT
+
+-- 积分变量
+DECLARE @Score BIGINT
+DECLARE @Ingot BIGINT
+DECLARE @Insure BIGINT
+DECLARE @Beans decimal(18, 2)
+DECLARE @RoomCardCount INT
+
+-- 局数信息
+DECLARE @WinCount INT
+DECLARE @LostCount INT
+DECLARE @DrawCount INT
+DECLARE @FleeCount INT
+
+-- 扩展信息
+DECLARE @GameID INT
+DECLARE @Gender TINYINT
+DECLARE @UserMedal INT
+DECLARE @Experience INT
+DECLARE @LoveLiness INT
+DECLARE @MasterRight INT
+DECLARE @MemberOrder SMALLINT
+DECLARE @MemberOverDate DATETIME
+DECLARE @MemberSwitchDate DATETIME
+DECLARE @GameLogonTimes INT
+
+
+-- 辅助变量
+DECLARE @EnjoinLogon AS INT
+
+-- 执行逻辑
+BEGIN
+
+	-- 系统暂停
+	SELECT @EnjoinLogon=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SELECT @strErrorDescribe=StatusString FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+		RETURN 2
+	END
+
+	-- 效验地址
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineAddress(NOLOCK) WHERE AddrString=@strClientIP AND GETDATE()<EnjoinOverDate
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您所在的 IP 地址的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 4
+	END
+	
+	-- 效验机器
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineMachine(NOLOCK) WHERE MachineSerial=@strMachineID AND GETDATE()<EnjoinOverDate
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您的机器的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 7
+	END
+
+	DECLARE @DateID INT
+	SET @DateID=CAST(CAST(GETDATE() AS FLOAT) AS INT)
+
+	-- 查询用户
+	DECLARE @Nullity TINYINT
+	DECLARE @StunDown TINYINT
+	DECLARE @LogonPass AS NCHAR(32)
+	DECLARE @InsurePass AS NCHAR(32)
+	DECLARE @MachineSerial AS NCHAR(32)
+	DECLARE @MoorMachine AS TINYINT
+	DECLARE @MasterOrder AS TINYINT
+	SELECT @UserID=UserID, @GameID=GameID, @Accounts=Accounts, @NickName=NickName, @PlatformID=PlatformID, @UserUin=UserUin, @UnderWrite=UnderWrite, @LogonPass=LogonPass,
+		@FaceID=FaceID, @CustomID=CustomID, @Gender=Gender, @Nullity=Nullity, @StunDown=StunDown, @UserMedal=UserMedal, @Experience=Experience,	@InsurePass=InsurePass,
+		@LoveLiness=LoveLiness, @MemberOrder=MemberOrder, @MemberOverDate=MemberOverDate, @MemberSwitchDate=MemberSwitchDate,@MachineSerial=LastLogonMachine,
+		@MoorMachine=MoorMachine,@MasterOrder=MasterOrder,@MasterRight=MasterRight,@SpreaderID=SpreaderID,@PlayTimeCount=PlayTimeCount
+	FROM AccountsInfo(NOLOCK) WHERE RegisterMachine=@strMachineID AND PlatformID=@cbLogonMode
+
+	-- 注册用户
+	IF @UserID IS NULL
+	BEGIN	
+
+		-- 临时账号
+		DECLARE @strTemp NVARCHAR(31)
+		SET @strTemp=CONVERT(NVARCHAR(31),REPLACE(NEWID(),'-','_'))
+		
+		-- 注册用户
+		INSERT AccountsInfo (Accounts,NickName,RegAccounts,PlatformID,UserUin,LogonPass,InsurePass,Gender,FaceID,
+			GameLogonTimes,LastLogonIP,LastLogonMobile,LastLogonMachine,RegisterIP,RegisterMobile,RegisterMachine)
+		VALUES (@strTemp,@strTemp,@strTemp,@cbLogonMode,@strMachineID,N'21218CCA77804D2BA1922C33E0151105',N'21218CCA77804D2BA1922C33E0151105',10,0,
+			1,@strClientIP,N'',@strMachineID,@strClientIP,N'',@strMachineID)
+
+		-- 玩家账号
+		DECLARE @MaxUserID INT
+		SELECT @MaxUserID=SCOPE_IDENTITY()
+		DECLARE @strTempName NVARCHAR(31)
+		SET @strTempName=N'游客'+CONVERT(NVARCHAR(31)
+GSP_MB_EfficacyLogonVisitor	,@MaxUserID)
+		
+		--更新账号昵称
+		UPDATE AccountsInfo SET Accounts=@strTempName,NickName=@strTempName,RegAccounts=@strTempName WHERE UserID=@MaxUserID
+
+		-- 记录日志
+		UPDATE SystemStreamInfo SET GameRegisterSuccess=GameRegisterSuccess+1 WHERE DateID=@DateID
+		IF @@ROWCOUNT=0 INSERT SystemStreamInfo (DateID, GameRegisterSuccess) VALUES (@DateID, 1)
+
+		-- 查询用户
+		SELECT @UserID=UserID, @GameID=GameID, @Accounts=Accounts, @NickName=NickName, @UserUin=UserUin, @UnderWrite=UnderWrite, @LogonPass=LogonPass,
+			@FaceID=FaceID, @CustomID=CustomID, @Gender=Gender, @Nullity=Nullity, @StunDown=StunDown, @UserMedal=UserMedal, @Experience=Experience,
+			@LoveLiness=LoveLiness, @MemberOrder=MemberOrder, @MemberOverDate=MemberOverDate, @MemberSwitchDate=MemberSwitchDate,
+			@MoorMachine=MoorMachine,@SpreaderID=SpreaderID,@PlayTimeCount=PlayTimeCount
+		FROM AccountsInfo(NOLOCK) WHERE RegisterMachine=@strMachineID AND PlatformID=@cbLogonMode
+
+		-- 分配标识
+		SELECT @GameID=GameID FROM GameIdentifier(NOLOCK) WHERE UserID=@UserID
+		IF @GameID IS NULL 
+		BEGIN
+			SET @GameID=0
+			SET @strErrorDescribe=N'用户注册成功，但未成功获取游戏 ID 号码，系统稍后将给您分配！'
+		END
+		ELSE UPDATE AccountsInfo SET GameID=@GameID WHERE UserID=@UserID
+
+		----------------------------------------------------------------------------------------------------
+		----------------------------------------------------------------------------------------------------
+		-- 注册赠送
+
+		-- 读取变量
+		DECLARE @GrantIPCount AS BIGINT
+		DECLARE @GrantScoreCount AS BIGINT
+		DECLARE @GrantRoomCardCount AS BIGINT
+		SELECT @GrantIPCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'GrantIPCount'
+		SELECT @GrantScoreCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'GrantScoreCount'
+		SELECT @GrantRoomCardCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'GrantRoomCardCount'
+
+
+		-- 赠送限制
+		IF @GrantScoreCount IS NOT NULL AND @GrantScoreCount>0 AND @GrantIPCount IS NOT NULL AND @GrantIPCount>0
+		BEGIN
+			-- 赠送次数
+			DECLARE @GrantCount AS BIGINT
+			SELECT @GrantCount=GrantCount FROM SystemGrantCount(NOLOCK) WHERE DateID=@DateID AND RegisterIP=@strClientIP
+		
+			-- 次数判断
+			IF @GrantCount IS NOT NULL AND @GrantCount>=@GrantIPCount
+			BEGIN
+				SET @GrantScoreCount=0
+			END
+		END
+
+		-- 赠送金币
+		IF @GrantScoreCount IS NOT NULL AND @GrantScoreCount>0
+		BEGIN
+			-- 更新记录
+			UPDATE SystemGrantCount SET GrantScore=GrantScore+@GrantScoreCount, GrantCount=GrantCount+1 WHERE DateID=@DateID AND RegisterIP=@strClientIP
+
+			-- 插入记录
+			IF @@ROWCOUNT=0
+			BEGIN
+				INSERT SystemGrantCount (DateID, RegisterIP, RegisterMachine, GrantScore, GrantCount) VALUES (@DateID, @strClientIP, N'', @GrantScoreCount, 1)
+			END
+
+			-- 赠送金币
+			INSERT   THTreasureDB.dbo.GameScoreInfo (UserID, Score, RegisterIP, LastLogonIP) VALUES (@UserID, @GrantScoreCount, @strClientIP, @strClientIP) 
+			
+			-- 赠送房卡
+			INSERT   THAccountsDB.dbo.AccountsPackage (UserID, GoodsID, GoodShowID, GoodsSortID, GoodsCount, PushTime)
+			VALUES (@UserID, 110, 0, 0, @GrantRoomCardCount, GETDATE())
+		END
+
+		----------------------------------------------------------------------------------------------------
+		----------------------------------------------------------------------------------------------------
+
+	END	
+	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+
+	-- 帐号关闭
+	IF @StunDown<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号使用了安全关闭功能，必须重新开通后才能继续使用！'
+		RETURN 2
+	END	
+	
+	-- 固定机器
+	IF @MoorMachine=1
+	BEGIN
+		IF @MachineSerial<>@strMachineID
+		BEGIN
+			SET @strErrorDescribe=N'您的帐号使用固定机器登录功能，您现所使用的机器不是所指定的机器！'
+			RETURN 1
+		END
+	END
+
+	-- 推广员提成
+	IF @SpreaderID<>0 
+	BEGIN
+		DECLARE @GrantTime	INT
+		DECLARE @GrantScore	BIGINT
+		DECLARE @Note NVARCHAR(512)
+		SET @Note = N'游戏时长达标一次性奖励'
+
+		SELECT @GrantTime=PlayTimeCount,@GrantScore=PlayTimeGrantScore FROM   THTreasureDB.dbo.GlobalSpreadInfo
+		WHE
+GSP_MB_EfficacyLogonVisitor	RE ID=1
+		IF @GrantTime IS NULL OR @GrantTime=0
+		BEGIN
+			SET @GrantTime = 108000 -- 30小时
+			SET @GrantScore = 200000
+		END			
+		IF @PlayTimeCount>=@GrantTime
+		BEGIN
+			-- 获取提成信息
+			DECLARE @RecordID INT
+			SELECT @RecordID=RecordID FROM   THTreasureDB.dbo.RecordSpreadInfo
+			WHERE UserID = @SpreaderID AND ChildrenID = @UserID AND TypeID = 2
+			IF @RecordID IS NULL
+			BEGIN
+				INSERT INTO   THTreasureDB.dbo.RecordSpreadInfo(
+					UserID,Score,TypeID,ChildrenID,CollectNote)
+				VALUES(@SpreaderID,@GrantScore,2,@UserID,@Note)	
+			END		
+		END
+	END
+
+	-- 查询金币
+	SELECT @Score=Score, @Ingot = Ingot,@Insure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID=@UserID
+	
+	-- 查询游戏豆
+	SELECT @Beans=Currency FROM   THTreasureDB.dbo.UserCurrencyInfo WHERE UserID=@UserID		
+	
+	-- 查询房卡
+	SELECT @RoomCardCount = GoodsCount FROM THAccountsDB.dbo.AccountsPackage WHERE UserID=@UserID AND GoodsID = 110
+
+	-- 数据调整
+	IF @Score IS NULL SET @Score=0
+	IF @Ingot IS NULL SET @Ingot=0
+	IF @Insure IS NULL SET @Insure=0
+	IF @Beans IS NULL SET @Beans=0
+	IF @RoomCardCount IS NULL SET @RoomCardCount=0
+	
+	-- 局数信息
+	SELECT @WinCount=WinCount, @LostCount=LostCount, @DrawCount=DrawCount,@FleeCount=FleeCount
+	FROM THTreasureDB.dbo.GameScoreInfo WHERE UserID=@UserID
+	
+	-- 数据调整
+	IF @WinCount IS NULL SET @WinCount=0
+	IF @LostCount IS NULL SET @LostCount=0
+	IF @DrawCount IS NULL SET @DrawCount=0
+	IF @FleeCount IS NULL SET @FleeCount=0
+
+	-- 会员等级
+	IF @MemberOrder<>0 AND GETDATE()>@MemberSwitchDate
+	BEGIN
+		DECLARE @UserRight INT	
+		SET @UserRight=0
+		
+		-- 删除会员
+		DELETE AccountsMember WHERE UserID=@UserID AND MemberOverDate<=GETDATE()
+
+		-- 搜索会员
+		SELECT @MemberOverDate=MAX(MemberOverDate), @MemberOrder=MAX(MemberOrder), @MemberSwitchDate=MIN(MemberOverDate)
+			FROM AccountsMember(NOLOCK) WHERE UserID=@UserID
+
+		-- 数据调整
+		IF @MemberOrder IS NULL 
+		BEGIN
+			SET @MemberOrder=0
+			SET @UserRight=512
+		END
+		IF @MemberOverDate IS NULL SET @MemberOverDate='1980-1-1'
+		IF @MemberSwitchDate IS NULL SET @MemberSwitchDate='1980-1-1'
+
+		-- 更新数据
+		UPDATE AccountsInfo SET MemberOrder=@MemberOrder, MemberOverDate=@MemberOverDate, MemberSwitchDate=@MemberSwitchDate,
+			UserRight=UserRight&~@UserRight WHERE UserID=@UserID
+	END
+
+	-- 更新信息
+	UPDATE AccountsInfo SET GameLogonTimes=GameLogonTimes+1, LastLogonDate=GETDATE(), LastLogonIP=@strClientIP,DynamicPassTime=GETDATE(),
+		DynamicPass=CONVERT(nvarchar(32),REPLACE(newid(),'-','')),LastLogonMachine=@strMachineID, LastLogonMobile=@strMobilePhone 
+	WHERE UserID=@UserID
+	
+	-- 更新信息
+	--UPDATE THAccountsDB.dbo.RecordPetRewards SET LastLogonTime=GETDATE() WHERE UserID=@UserID AND DateDiff(d,InsertTime,GetDate())=0
+	exec THPlatformDB.dbo.GSP_GP_PetUpdateDayLogon @UserID
+	
+	-- 记录日志
+	UPDATE SystemStreamInfo SET GameLogonSuccess=GameLogonSuccess+1 WHERE DateID=@DateID
+	IF @@ROWCOUNT=0 INSERT SystemStreamInfo (DateID, GameLogonSuccess) VALUES (@DateID, 1)
+
+	-- 动态密码
+	DECLARE @szDynamicPass  nchar(32)
+	SELECT @szDynamicPass=DynamicPass FROM AccountsInfo WHERE UserID=@UserID
+	
+	-- 进入记录
+	INSERT THAccountsDB.dbo.RecordUserInout (UserID,EnterTime,EnterClientKind, EnterClientIP, EnterMachine)
+	VALUES (@UserID, GETDATE(),@cbClientKind, @strClientIP, @strMachineID)
+
+	-- 记录标识
+	DECLARE @InoutIndex BIGINT
+	SET @InoutIndex=SCOPE_IDENTITY()
+	
+	-- 更新记录
+	UPDATE THAccountsDB.dbo.AccountsOnlineStatus 
+	SET UserID=@UserID,ClientKind = @cbClientKind,ServerName=@strServerName, EnterID=@InoutIndex,EnterIP=@strClientIP, EnterMachine=@strMachineID
+	WHERE UserID=@UserID
+	
+	-- 插入记录
+	IF @@ROWCOUNT=0
+	BEGIN
+		INSERT INTO THAccountsDB.dbo.AccountsOnlineStatus(UserID,ClientKind, ServerName, EnterID, EnterIP, EnterMachine)
+		VALUES(@UserID,@cbClientKind, @strServerName, @InoutIndex, @strClientIP, @strMachineID)
+	END
+
+	-- 银行标识
+	DECLARE @InsureEnabled TINYINT
+	SET @InsureEnabled=0
+	IF @InsurePass <> '' SET @InsureEnabled=1
+	
+	-- 代理标识
+	DECLARE @IsAgent TINYINT
+	
+GSP_MB_EfficacyLogonVisitor	SET @IsAgent =0
+	IF EXISTS (SELECT * FROM AccountsAgent WHERE UserID=@UserID and Nullity=0) SET @IsAgent=1
+	
+	-- 登陆次数
+	SELECT @GameLogonTimes = GameLogonTimes FROM THAccountsDB.dbo.AccountsInfo WHERE UserID=@UserID
+	IF @GameLogonTimes IS NULL SET @GameLogonTimes = 0
+
+	-- 输出变量
+	SELECT @UserID AS UserID, @GameID AS GameID, @Accounts AS Accounts, @NickName AS NickName,@szDynamicPass AS DynamicPass,
+		@UnderWrite AS UnderWrite,@FaceID AS FaceID, @CustomID AS CustomID, @Gender AS Gender, @Ingot AS Ingot, 
+		@Experience AS Experience,@Score AS Score, @Insure AS Insure, @Beans AS Beans, @RoomCardCount AS RoomCard, 
+		@WinCount AS WinCount,@LostCount AS LostCount, @DrawCount AS DrawCount, @FleeCount AS FleeCount,
+		@LoveLiness AS LoveLiness, @MemberOrder AS MemberOrder, 
+		@MemberOverDate AS MemberOverDate,@MoorMachine AS MoorMachine,@MasterOrder AS MasterOrder,@MasterRight AS MasterRight, @InsureEnabled AS InsureEnabled,
+		@PlatformID AS LogonMode,@IsAgent AS IsAgent, @InsurePass AS InsurePass,@InoutIndex AS InoutIndex,@strMachineID AS MachineID,
+		@GameLogonTimes AS GameLogonTimes
+END
+
+RETURN 0
+
+
+GSP_GP_RegisterAccounts	
+----------------------------------------------------------------------------------------------------
+
+-- 帐号注册
+CREATE PROC GSP_GP_RegisterAccounts
+	@strAccounts NVARCHAR(31),					-- 用户帐号
+	@strNickName NVARCHAR(31),					-- 用户昵称
+	@strSpreader NVARCHAR(31),					-- 推荐帐号
+	@strLogonPass NCHAR(32),					-- 登录密码
+	@wFaceID SMALLINT,							-- 头像标识
+	@cbGender TINYINT,							-- 用户性别
+	@strPassPortID NVARCHAR(18),				-- 身份证号
+	@strCompellation NVARCHAR(16),				-- 真实名字
+	@wAgentID INT,								-- 代理标识	
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineID NCHAR(32),					-- 机器标识
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 基本信息
+DECLARE @UserID INT
+DECLARE @Gender TINYINT
+DECLARE @FaceID SMALLINT
+DECLARE @CustomID INT
+DECLARE @MoorMachine TINYINT
+DECLARE @Accounts NVARCHAR(31)
+DECLARE @NickName NVARCHAR(31)
+DECLARE @PlatformID TINYINT
+DECLARE @UserUin NVARCHAR(32)
+DECLARE @DynamicPass NCHAR(32)
+DECLARE @UnderWrite NVARCHAR(63)
+DECLARE @InsurePass NVARCHAR(32)
+
+-- 积分变量
+DECLARE @Score BIGINT
+DECLARE @Insure BIGINT
+DECLARE @Beans decimal(18, 2)
+DECLARE @RoomCardCount INT
+
+-- 附加信息
+DECLARE @GameID INT
+DECLARE @UserMedal INT
+DECLARE @Experience INT
+DECLARE @LoveLiness INT
+DECLARE @SpreaderID INT
+DECLARE @AgentID INT
+DECLARE @MemberOrder SMALLINT
+DECLARE @MemberOverDate DATETIME
+
+-- 辅助变量
+DECLARE @EnjoinLogon AS INT
+DECLARE @EnjoinRegister AS INT
+
+-- 执行逻辑
+BEGIN
+	-- 注册暂停
+	SELECT @EnjoinRegister=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinRegister'
+	IF @EnjoinRegister IS NOT NULL AND @EnjoinRegister<>0
+	BEGIN
+		SELECT @strErrorDescribe=StatusString FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinRegister'
+		RETURN 1
+	END
+
+	-- 登录暂停
+	SELECT @EnjoinLogon=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SELECT @strErrorDescribe=StatusString FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+		RETURN 2
+	END
+
+	-- 效验名字
+	IF EXISTS (SELECT [String] FROM ConfineContent(NOLOCK) WHERE CHARINDEX(String,@strAccounts)>0 AND (EnjoinOverDate>GETDATE() OR EnjoinOverDate IS NULL))
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，您所输入的登录帐号名含有限制字符串，请更换帐号名后再次申请帐号！'
+		RETURN 4
+	END
+
+	-- 效验昵称
+	IF EXISTS (SELECT [String] FROM ConfineContent(NOLOCK) WHERE CHARINDEX(String,@strNickname)>0 AND (EnjoinOverDate>GETDATE() OR EnjoinOverDate IS NULL))
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，您所输入的游戏昵称名含有限制字符串，请更换昵称名后再次申请帐号！'
+		RETURN 4
+	END
+
+	-- 效验地址
+	SELECT @EnjoinRegister=EnjoinRegister FROM ConfineAddress(NOLOCK) WHERE AddrString=@strClientIP AND (EnjoinOverDate>GETDATE() OR EnjoinOverDate IS NULL)
+	IF @EnjoinRegister IS NOT NULL AND @EnjoinRegister<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您所在的 IP 地址的注册功能，请联系客户服务中心了解详细情况！'
+		RETURN 5
+	END
+	
+	-- 效验机器
+	SELECT @EnjoinRegister=EnjoinRegister FROM ConfineMachine(NOLOCK) WHERE MachineSerial=@strMachineID AND (EnjoinOverDate>GETDATE() OR EnjoinOverDate IS NULL)
+	IF @EnjoinRegister IS NOT NULL AND @EnjoinRegister<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您的机器的注册功能，请联系客户服务中心了解详细情况！'
+		RETURN 6
+	END
+ 
+ 	-- 校验频率
+ 	DECLARE @LimitRegisterIPCount INT
+ 	DECLARE @CurrRegisterCountIP INT
+ 	SET @LimitRegisterIPCount = 0
+ 	SET @CurrRegisterCountIP = 0
+ 	SELECT @LimitRegisterIPCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'LimitRegisterIPCount'
+ 	SELECT @CurrRegisterCountIP = COUNT(RegisterIP) FROM AccountsInfo WHERE RegisterIP=@strClientIP AND DateDiff(hh,RegisterDate,GetDate())<24
+ 	IF @LimitRegisterIPCount <>0
+ 	BEGIN
+ 		IF @LimitRegisterIPCount<=@CurrRegisterCountIP 
+		BEGIN
+			SET @strErrorDescribe = N'抱歉地通知您，您的机器当前注册超过次数限制！'
+			RETURN 10
+		END		 	
+ 	END 
+
+ 	
+ 	-- 校验频率
+  	DECLARE @LimitRegisterMachineCount INT
+ 	DECLARE @CurrRegisterCountMachine INT
+ 	SET @LimitRegisterMachineCount = 0
+ 	SET @CurrRegisterCountMachine = 0	
+ 	SELECT @LimitRegisterM
+GSP_GP_RegisterAccounts	achineCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'LimitRegisterMachineCount'
+ 	SELECT @CurrRegisterCountMachine = COUNT(RegisterMachine) FROM AccountsInfo WHERE RegisterMachine=@strMachineID AND DateDiff(hh,RegisterDate,GetDate())<24
+ 	IF @LimitRegisterMachineCount <>0
+ 	BEGIN 
+  		IF @LimitRegisterMachineCount<=@CurrRegisterCountMachine 
+		BEGIN
+			SET @strErrorDescribe = N'抱歉地通知您，您的机器当前注册超过次数限制！'
+			RETURN 10
+		END	
+	END
+	
+	-- 查询帐号
+	IF EXISTS (SELECT UserID FROM AccountsInfo(NOLOCK) WHERE Accounts=@strAccounts)
+	BEGIN
+		SET @strErrorDescribe=N'此帐号已被注册，请换另一帐号尝试再次注册！'
+		RETURN 7
+	END
+
+	-- 查询昵称
+	IF EXISTS (SELECT UserID FROM AccountsInfo(NOLOCK) WHERE NickName=@strNickName)
+	BEGIN
+		SET @strErrorDescribe=N'此昵称已被注册，请换另一昵称尝试再次注册！'
+		RETURN 7
+	END
+
+	-- 查推广员
+	IF @strSpreader<>''
+	BEGIN
+		-- 查推广员
+		SELECT @SpreaderID=UserID,@AgentID=AgentID FROM AccountsInfo(NOLOCK) WHERE Accounts=@strSpreader
+		
+		-- 结果处理
+		IF @SpreaderID IS NULL
+		BEGIN
+			SET @strErrorDescribe=N'您所填写的推荐人不存在或者填写错误，请检查后再次注册！'
+			RETURN 8			
+		END
+	END
+	ELSE SET @SpreaderID=0
+	
+	IF @SpreaderID=0
+	BEGIN
+			--查询代理
+			SELECT @SpreaderID = UserID FROM AccountsAgent  where AgentID = @wAgentID
+			SET @wAgentID = 0		
+	END
+
+	-- 注册用户
+	INSERT AccountsInfo (Accounts,NickName,RegAccounts,LogonPass,InsurePass,DynamicPass,DynamicPassTime,SpreaderID,PassPortID,Compellation,Gender,FaceID,
+		GameLogonTimes,LastLogonIP,LastLogonMachine,RegisterIP,RegisterMachine,RegisterOrigin,AgentID)
+	VALUES (@strAccounts,@strNickName,@strAccounts,@strLogonPass,@strLogonPass,CONVERT(nvarchar(32),REPLACE(newid(),'-','')),GetDate(),@SpreaderID,
+		@strPassPortID,@strCompellation,@cbGender,@wFaceID,1,@strClientIP,@strMachineID,@strClientIP,@strMachineID,0,@wAgentID)
+
+	-- 错误判断
+	IF @@ERROR<>0
+	BEGIN
+		SET @strErrorDescribe=N'帐号已存在，请换另一帐号名字尝试再次注册！'
+		RETURN 8
+	END
+
+	-- 查询用户
+	SELECT @UserID=UserID, @GameID=GameID, @Accounts=Accounts, @NickName=NickName,@InsurePass=InsurePass,@DynamicPass=DynamicPass,@UnderWrite=UnderWrite, @FaceID=FaceID,
+		@CustomID=CustomID, @Gender=Gender, @UserMedal=UserMedal, @Experience=Experience, @LoveLiness=LoveLiness, @MemberOrder=MemberOrder,
+		@MemberOverDate=MemberOverDate, @MoorMachine=MoorMachine
+	FROM AccountsInfo(NOLOCK) WHERE Accounts=@strAccounts
+
+	-- 分配标识
+	SELECT @GameID=GameID FROM GameIdentifier(NOLOCK) WHERE UserID=@UserID
+	IF @GameID IS NULL 
+	BEGIN
+		SET @GameID=0
+		SET @strErrorDescribe=N'用户注册成功，但未成功获取游戏 ID 号码，系统稍后将给您分配！'
+	END
+	ELSE UPDATE AccountsInfo SET GameID=@GameID WHERE UserID=@UserID
+
+	-- 附属资料
+	INSERT	IndividualDatum(UserID,QQ,EMail,SeatPhone,MobilePhone,DwellingPlace,PostalCode,CollectDate,UserNote) VALUES(@UserID,N'',N'',N'',N'',N'',N'',GetDate(),N'')
+	
+	-- 推广提成,代理商不参与
+	IF @SpreaderID<>0 AND @AgentID=0
+	BEGIN
+		DECLARE @RegisterGrantScore INT
+		DECLARE @Note NVARCHAR(512)
+		SET @Note = N'注册'
+		SELECT @RegisterGrantScore = RegisterGrantScore FROM   THTreasureDB.dbo.GlobalSpreadInfo
+		IF @RegisterGrantScore IS NULL
+		BEGIN
+			SET @RegisterGrantScore=5000
+		END
+		INSERT INTO   THTreasureDB.dbo.RecordSpreadInfo(
+			UserID,Score,TypeID,ChildrenID,CollectNote)
+		VALUES(@SpreaderID,@RegisterGrantScore,1,@UserID,@Note)		
+	END
+
+	-- 记录日志
+	DECLARE @DateID INT
+	SET @DateID=CAST(CAST(GETDATE() AS FLOAT) AS INT)
+	UPDATE SystemStreamInfo SET GameRegisterSuccess=GameRegisterSuccess+1 WHERE DateID=@DateID
+	IF @@ROWCOUNT=0 INSERT SystemStreamInfo (DateID, GameRegisterSuccess) VALUES (@DateID, 1)
+
+	--积分归零
+	INSERT   THTreasureDB.dbo.GameScoreInfo (UserID, Score, RegisterIP, LastLogonIP,RegisterMachine) VALUES (@UserID, 0, @strClientIP, @strClientIP,@strMachineID) 
+
+	----------------------------------------------------------------------------------------------------
+	----------------------------------------------------------------------------------------------------
+	-- 注册赠送
+
+	-- 读取变量
+	DECLARE @GrantIPCount AS BIGINT
+	DECLARE @GrantScoreCount AS
+GSP_GP_RegisterAccounts	 BIGINT
+	SELECT @GrantIPCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'GrantIPCount'
+	SELECT @GrantScoreCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'GrantScoreCount'
+
+	-- 赠送限制
+	IF @GrantScoreCount IS NOT NULL AND @GrantScoreCount>0 AND @GrantIPCount IS NOT NULL AND @GrantIPCount>0
+	BEGIN
+		-- 赠送次数
+		DECLARE @GrantCount AS BIGINT
+		DECLARE @GrantMachineCount AS BIGINT
+		SELECT @GrantCount=GrantCount FROM SystemGrantCount(NOLOCK) WHERE DateID=@DateID AND RegisterIP=@strClientIP
+		SELECT @GrantMachineCount=GrantCount FROM SystemMachineGrantCount(NOLOCK) WHERE DateID=@DateID AND RegisterMachine=@strMachineID
+	
+		-- 次数判断
+		IF (@GrantCount IS NOT NULL AND @GrantCount>=@GrantIPCount) OR (@GrantMachineCount IS NOT NULL AND @GrantMachineCount>=@GrantIPCount)
+		BEGIN
+			SET @GrantScoreCount=0
+		END
+	END
+
+	-- 赠送金币
+	IF @GrantScoreCount IS NOT NULL AND @GrantScoreCount>0
+	BEGIN
+		-- 更新记录
+		UPDATE SystemGrantCount SET GrantScore=GrantScore+@GrantScoreCount, GrantCount=GrantCount+1 WHERE DateID=@DateID AND RegisterIP=@strClientIP
+
+		-- 插入记录
+		IF @@ROWCOUNT=0
+		BEGIN
+			INSERT SystemGrantCount (DateID, RegisterIP, RegisterMachine, GrantScore, GrantCount) VALUES (@DateID, @strClientIP, @strMachineID, @GrantScoreCount, 1)
+		END
+
+		-- 更新记录
+		UPDATE SystemMachineGrantCount SET GrantScore=GrantScore+@GrantScoreCount, GrantCount=GrantCount+1 WHERE DateID=@DateID AND RegisterMachine=@strMachineID
+
+		-- 插入记录
+		IF @@ROWCOUNT=0
+		BEGIN
+			INSERT SystemMachineGrantCount (DateID, RegisterIP, RegisterMachine, GrantScore, GrantCount) VALUES (@DateID, @strClientIP, @strMachineID, @GrantScoreCount, 1)
+		END
+
+		-- 查询金币
+		DECLARE @CurrScore BIGINT
+		DECLARE @CurrInsure BIGINT
+		DECLARE @CurrMedal INT
+		SELECT @CurrScore=Score,@CurrInsure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo  WHERE UserID=@UserID
+		SELECT @CurrMedal=UserMedal FROM   THAccountsDB.dbo.AccountsInfo WHERE UserID=@UserID
+	
+		-- 赠送金币
+		UPDATE   THTreasureDB.dbo.GameScoreInfo SET Score = Score+@GrantScoreCount WHERE UserID = @UserID AND RegisterIP = @strClientIP AND RegisterMachine = @strMachineID
+	
+		-- 流水账
+		INSERT INTO   THTreasureDB.dbo.RecordPresentInfo(UserID,PreScore,PreInsureScore,PresentScore,TypeID,IPAddress,CollectDate)
+		VALUES (@UserID,@CurrScore,@CurrInsure,@GrantScoreCount,1,@strClientIP,GETDATE())	
+		
+	    -- 日统计
+	    UPDATE   THTreasureDB.dbo.StreamPresentInfo SET DateID=@DateID, PresentCount=PresentCount+1,PresentScore=PresentScore+@GrantScoreCount WHERE UserID=@UserID AND TypeID=1
+		IF @@ROWCOUNT=0
+		BEGIN
+			INSERT   THTreasureDB.dbo.StreamPresentInfo(DateID,UserID,TypeID,PresentCount,PresentScore) VALUES(@DateID,@UserID,1,1,@GrantScoreCount)
+		END	
+			
+	END
+
+	----------------------------------------------------------------------------------------------------
+	----------------------------------------------------------------------------------------------------
+
+	-- 查询金币
+	SELECT @Score=Score, @Insure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID=@UserID
+
+	-- 查询游戏豆
+	SELECT @Beans=Currency FROM   THTreasureDB.dbo.UserCurrencyInfo WHERE UserID=@UserID	
+	
+	-- 查询房卡
+	SELECT @RoomCardCount = GoodsCount FROM THAccountsDB.dbo.AccountsPackage WHERE UserID=@UserID AND GoodsID = 110
+
+	-- 数据调整
+	IF @Score IS NULL SET @Score=0
+	IF @Insure IS NULL SET @Insure=0
+    IF @Beans IS NULL SET @Beans=0
+    IF @RoomCardCount IS NULL SET @RoomCardCount=0
+    
+    -- 进入记录
+	INSERT THAccountsDB.dbo.RecordUserInout (UserID,EnterTime,EnterClientKind, EnterClientIP, EnterMachine)
+	VALUES (@UserID, GETDATE(),3, @strClientIP, @strMachineID)
+
+	-- 记录标识
+	DECLARE @InoutIndex BIGINT
+	SET @InoutIndex=SCOPE_IDENTITY()
+	
+	-- 更新记录
+	UPDATE THAccountsDB.dbo.AccountsOnlineStatus 
+	SET UserID=@UserID,ClientKind = 3,ServerName=N'注册', EnterID=@InoutIndex,EnterIP=@strClientIP, EnterMachine=@strMachineID
+	WHERE UserID=@UserID
+	
+	-- 插入记录
+	IF @@ROWCOUNT=0
+	BEGIN
+		INS
+GSP_MB_RegisterAccounts	
+----------------------------------------------------------------------------------------------------
+
+-- 帐号注册
+CREATE PROC GSP_MB_RegisterAccounts
+	@strAccounts NVARCHAR(31),					-- 用户帐号
+	@strNickName NVARCHAR(31),					-- 用户昵称
+	@strSpreader NVARCHAR(31),					-- 推荐帐号	
+	@strLogonPass NCHAR(32),					-- 登录密码
+	@wFaceID SMALLINT,							-- 头像标识
+	@cbGender TINYINT,							-- 用户性别
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineID NCHAR(32),					-- 机器标识
+	@strMobilePhone NVARCHAR(11),				-- 手机号码
+	@cbDeviceType TINYINT,						-- 注册来源	
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 基本信息
+DECLARE @UserID INT
+DECLARE @Gender TINYINT
+DECLARE @FaceID SMALLINT
+DECLARE @CustomID INT
+DECLARE @MoorMachine TINYINT
+DECLARE @Accounts NVARCHAR(31)
+DECLARE @NickName NVARCHAR(31)
+DECLARE @PlatformID TINYINT
+DECLARE @DynamicPass NCHAR(32)
+DECLARE @UnderWrite NVARCHAR(63)
+DECLARE @InsurePass NVARCHAR(32)
+
+-- 积分变量
+DECLARE @Score BIGINT
+DECLARE @Insure BIGINT
+DECLARE @Beans decimal(18, 2)
+DECLARE @RoomCardCount INT
+
+-- 扩展信息
+DECLARE @GameID INT
+DECLARE @UserMedal INT
+DECLARE @Experience INT
+DECLARE @LoveLiness INT
+DECLARE @SpreaderID INT
+DECLARE @MemberOrder SMALLINT
+DECLARE @MemberOverDate DATETIME
+
+-- 辅助变量
+DECLARE @EnjoinLogon AS INT
+DECLARE @EnjoinRegister AS INT
+
+-- 执行逻辑
+BEGIN
+	-- 注册暂停
+	SELECT @EnjoinRegister=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinRegister'
+	IF @EnjoinRegister IS NOT NULL AND @EnjoinRegister<>0
+	BEGIN
+		SELECT @strErrorDescribe=StatusString FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinRegister'
+		RETURN 1
+	END
+
+	-- 登录暂停
+	SELECT @EnjoinLogon=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SELECT @strErrorDescribe=StatusString FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+		RETURN 2
+	END
+
+	-- 效验名字
+	IF (SELECT COUNT(*) FROM ConfineContent(NOLOCK) WHERE CHARINDEX(String,@strAccounts)>0)>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，您所输入的登录帐号名含有限制字符串，请更换帐号名后再次申请帐号！'
+		RETURN 4
+	END
+
+	-- 效验昵称
+	IF (SELECT COUNT(*) FROM ConfineContent(NOLOCK) WHERE CHARINDEX(String,@strNickName)>0)>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，您所输入的游戏昵称名含有限制字符串，请更换昵称名后再次申请帐号！'
+		RETURN 4
+	END
+
+	-- 效验地址
+	SELECT @EnjoinRegister=EnjoinRegister FROM ConfineAddress(NOLOCK) WHERE AddrString=@strClientIP AND (EnjoinOverDate>GETDATE() OR EnjoinOverDate IS NULL)
+	IF @EnjoinRegister IS NOT NULL AND @EnjoinRegister<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您所在的 IP 地址的注册功能，请联系客户服务中心了解详细情况！'
+		RETURN 5
+	END
+	
+	-- 效验机器
+	SELECT @EnjoinRegister=EnjoinRegister FROM ConfineMachine(NOLOCK) WHERE MachineSerial=@strMachineID AND (EnjoinOverDate>GETDATE() OR EnjoinOverDate IS NULL)
+	IF @EnjoinRegister IS NOT NULL AND @EnjoinRegister<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您的机器的注册功能，请联系客户服务中心了解详细情况！'
+		RETURN 6
+	END
+
+ 	-- 校验频率
+ 	DECLARE @LimitRegisterIPCount INT
+ 	DECLARE @CurrRegisterCountIP INT
+ 	SET @LimitRegisterIPCount = 0
+ 	SET @CurrRegisterCountIP = 0
+ 	SELECT @LimitRegisterIPCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'LimitRegisterIPCount'
+ 	SELECT @CurrRegisterCountIP = COUNT(RegisterIP) FROM AccountsInfo WHERE RegisterIP=@strClientIP AND DateDiff(hh,RegisterDate,GetDate())<24
+ 	IF @LimitRegisterIPCount <>0
+ 	BEGIN
+ 		IF @LimitRegisterIPCount<=@CurrRegisterCountIP 
+		BEGIN
+			SET @strErrorDescribe = N'抱歉地通知您，您的机器当前注册超过次数限制！'
+			RETURN 10
+		END		 	
+ 	END 
+
+ 	
+ 	-- 校验频率
+  	DECLARE @LimitRegisterMachineCount INT
+ 	DECLARE @CurrRegisterCountMachine INT
+ 	SET @LimitRegisterMachineCount = 0
+ 	SET @CurrRegisterCountMachine = 0	
+ 	SELECT @LimitRegisterMachineCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'LimitRegisterMachineCount'
+ 	SELECT @CurrRegisterCountMachine = COUNT(RegisterMachine) FROM AccountsInfo WHERE RegisterMachine=@strMachineID
+GSP_MB_RegisterAccounts	 AND DateDiff(hh,RegisterDate,GetDate())<24
+ 	IF @LimitRegisterMachineCount <>0
+ 	BEGIN 
+  		IF @LimitRegisterMachineCount<=@CurrRegisterCountMachine 
+		BEGIN
+			SET @strErrorDescribe = N'抱歉地通知您，您的机器当前注册超过次数限制！'
+			RETURN 10
+		END	
+	END
+	
+	-- 查询帐号
+	IF EXISTS (SELECT UserID FROM AccountsInfo(NOLOCK) WHERE Accounts=@strAccounts)
+	BEGIN
+		SET @strErrorDescribe=N'此帐号已被注册，请换另一帐号尝试再次注册！'
+		RETURN 7
+	END
+
+	-- 查询昵称
+	IF EXISTS (SELECT UserID FROM AccountsInfo(NOLOCK) WHERE NickName=@strNickName)
+	BEGIN
+		SET @strErrorDescribe=N'此昵称已被注册，请换另一昵称尝试再次注册！'
+		RETURN 7
+	END
+
+	-- 查推广员
+	IF @strSpreader<>''
+	BEGIN
+		-- 查推广员
+		SELECT @SpreaderID=UserID FROM AccountsInfo(NOLOCK) WHERE Accounts=@strSpreader
+		
+		-- 结果处理
+		IF @SpreaderID IS NULL
+		BEGIN
+			SET @strErrorDescribe=N'您所填写的推荐人不存在或者填写错误，请检查后再次注册！'
+			RETURN 8			
+		END
+	END
+	ELSE SET @SpreaderID=0
+	
+	-- 注册用户
+	INSERT AccountsInfo (Accounts,NickName,RegAccounts,LogonPass,InsurePass,DynamicPass,SpreaderID,Gender,FaceID,GameLogonTimes,LastLogonIP,LastLogonMobile,LastLogonMachine,RegisterIP,RegisterMobile,RegisterMachine,RegisterOrigin,AgentID)
+	VALUES (@strAccounts,@strNickName,@strAccounts,@strLogonPass,@strLogonPass,CONVERT(nvarchar(32),REPLACE(newid(),'-','')),@SpreaderID,@cbGender,@wFaceID,1,@strClientIP,@strMobilePhone,@strMachineID,@strClientIP,@strMobilePhone,@strMachineID,@cbDeviceType,0)
+
+	-- 错误判断
+	IF @@ERROR<>0
+	BEGIN
+		SET @strErrorDescribe=N'由于意外的原因，帐号注册失败，请尝试再次注册！'
+		RETURN 8
+	END
+
+	-- 查询用户
+	SELECT @UserID=UserID, @GameID=GameID, @Accounts=Accounts, @NickName=NickName,@InsurePass=InsurePass,@DynamicPass=DynamicPass,@UnderWrite=UnderWrite, @FaceID=FaceID,
+		@CustomID=CustomID, @Gender=Gender, @UserMedal=UserMedal, @Experience=Experience, @LoveLiness=LoveLiness, @MemberOrder=MemberOrder,
+		@MemberOverDate=MemberOverDate, @MoorMachine=MoorMachine
+	FROM AccountsInfo(NOLOCK) WHERE Accounts=@strAccounts
+
+	-- 分配标识
+	SELECT @GameID=GameID FROM GameIdentifier(NOLOCK) WHERE UserID=@UserID
+	IF @GameID IS NULL 
+	BEGIN
+		SET @GameID=0
+		SET @strErrorDescribe=N'用户注册成功，但未成功获取游戏 ID 号码，系统稍后将给您分配！'
+	END
+	ELSE UPDATE AccountsInfo SET GameID=@GameID WHERE UserID=@UserID
+
+	-- 推广提成
+	IF @SpreaderID<>0
+	BEGIN
+		DECLARE @RegisterGrantScore INT
+		DECLARE @Note NVARCHAR(512)
+		SET @Note = N'注册'
+		SELECT @RegisterGrantScore = RegisterGrantScore FROM   THTreasureDB.dbo.GlobalSpreadInfo
+		IF @RegisterGrantScore IS NULL
+		BEGIN
+			SET @RegisterGrantScore=5000
+		END
+		INSERT INTO   THTreasureDB.dbo.RecordSpreadInfo(
+			UserID,Score,TypeID,ChildrenID,CollectNote)
+		VALUES(@SpreaderID,@RegisterGrantScore,1,@UserID,@Note)		
+	END
+
+	-- 记录日志
+	DECLARE @DateID INT
+	SET @DateID=CAST(CAST(GETDATE() AS FLOAT) AS INT)
+	UPDATE SystemStreamInfo SET GameRegisterSuccess=GameRegisterSuccess+1 WHERE DateID=@DateID
+	IF @@ROWCOUNT=0 INSERT SystemStreamInfo (DateID, GameRegisterSuccess) VALUES (@DateID, 1)
+	--积分归零
+	INSERT   THTreasureDB.dbo.GameScoreInfo (UserID, Score, RegisterIP, LastLogonIP,RegisterMachine) VALUES (@UserID, 0, @strClientIP, @strClientIP,@strMachineID) 
+
+	----------------------------------------------------------------------------------------------------
+	----------------------------------------------------------------------------------------------------
+	-- 注册赠送
+
+	-- 读取变量
+	DECLARE @GrantIPCount AS BIGINT
+	DECLARE @GrantScoreCount AS BIGINT
+	SELECT @GrantIPCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'GrantIPCount'
+	SELECT @GrantScoreCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'GrantScoreCount'
+
+	-- 赠送限制
+	IF @GrantScoreCount IS NOT NULL AND @GrantScoreCount>0 AND @GrantIPCount IS NOT NULL AND @GrantIPCount>0
+	BEGIN
+		-- 赠送次数
+		DECLARE @GrantCount AS BIGINT
+		DECLARE @GrantMachineCount AS BIGINT
+		SELECT @GrantCount=GrantCount FROM SystemGrantCount(NOLOCK) WHERE DateID=@DateID AND RegisterIP=@strClientIP
+		SELECT @GrantMachineCount=GrantCount FROM SystemMachineGrantCount
+GSP_MB_RegisterAccounts	(NOLOCK) WHERE DateID=@DateID AND RegisterMachine=@strMachineID
+	
+		-- 次数判断
+		IF (@GrantCount IS NOT NULL AND @GrantCount>=@GrantIPCount) OR (@GrantMachineCount IS NOT NULL AND @GrantMachineCount>=@GrantIPCount)
+		BEGIN
+			SET @GrantScoreCount=0
+		END
+	END
+
+	-- 赠送金币
+	IF @GrantScoreCount IS NOT NULL AND @GrantScoreCount>0
+	BEGIN
+		-- 更新记录
+		UPDATE SystemGrantCount SET GrantScore=GrantScore+@GrantScoreCount, GrantCount=GrantCount+1 WHERE DateID=@DateID AND RegisterIP=@strClientIP
+
+		-- 插入记录
+		IF @@ROWCOUNT=0
+		BEGIN
+			INSERT SystemGrantCount (DateID, RegisterIP, RegisterMachine, GrantScore, GrantCount) VALUES (@DateID, @strClientIP, @strMachineID, @GrantScoreCount, 1)
+		END
+
+		-- 更新记录
+		UPDATE SystemMachineGrantCount SET GrantScore=GrantScore+@GrantScoreCount, GrantCount=GrantCount+1 WHERE DateID=@DateID AND RegisterMachine=@strMachineID
+
+		-- 插入记录
+		IF @@ROWCOUNT=0
+		BEGIN
+			INSERT SystemMachineGrantCount (DateID, RegisterIP, RegisterMachine, GrantScore, GrantCount) VALUES (@DateID, @strClientIP, @strMachineID, @GrantScoreCount, 1)
+		END
+
+		-- 查询金币
+		DECLARE @CurrScore BIGINT
+		DECLARE @CurrInsure BIGINT
+		DECLARE @CurrMedal INT
+		SELECT @CurrScore=Score,@CurrInsure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo  WHERE UserID=@UserID
+		SELECT @CurrMedal=UserMedal FROM   THAccountsDB.dbo.AccountsInfo WHERE UserID=@UserID
+		
+		-- 赠送金币
+		UPDATE   THTreasureDB.dbo.GameScoreInfo SET Score = Score+@GrantScoreCount WHERE UserID = @UserID AND RegisterIP = @strClientIP AND RegisterMachine = @strMachineID
+		
+		-- 流水账
+		INSERT INTO   THTreasureDB.dbo.RecordPresentInfo(UserID,PreScore,PreInsureScore,PresentScore,TypeID,IPAddress,CollectDate)
+		VALUES (@UserID,@CurrScore,@CurrInsure,@GrantScoreCount,1,@strClientIP,GETDATE())			
+		
+	    -- 日统计
+	    UPDATE   THTreasureDB.dbo.StreamPresentInfo SET DateID=@DateID, PresentCount=PresentCount+1,PresentScore=PresentScore+@GrantScoreCount WHERE UserID=@UserID AND TypeID=1
+		IF @@ROWCOUNT=0
+		BEGIN
+			INSERT   THTreasureDB.dbo.StreamPresentInfo(DateID,UserID,TypeID,PresentCount,PresentScore) VALUES(@DateID,@UserID,1,1,@GrantScoreCount)
+		END		
+	END
+
+	----------------------------------------------------------------------------------------------------
+	----------------------------------------------------------------------------------------------------
+
+	-- 查询金币
+	SELECT @Score=Score, @Insure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID=@UserID
+
+	-- 查询游戏豆
+	SELECT @Beans=Currency FROM   THTreasureDB.dbo.UserCurrencyInfo WHERE UserID=@UserID	
+	
+	-- 查询房卡
+	SELECT @RoomCardCount = GoodsCount FROM THAccountsDB.dbo.AccountsPackage WHERE UserID=@UserID AND GoodsID = 110
+
+	-- 数据调整
+	IF @Score IS NULL SET @Score=0
+	IF @Beans IS NULL SET @Beans=0
+	IF @Insure IS NULL SET @Insure=0    
+	IF @RoomCardCount IS NULL SET @RoomCardCount=0
+	
+	-- 进入记录
+	INSERT THAccountsDB.dbo.RecordUserInout (UserID,EnterTime,EnterClientKind, EnterClientIP, EnterMachine)
+	VALUES (@UserID, GETDATE(),2, @strClientIP, @strMachineID)
+
+	-- 记录标识
+	DECLARE @InoutIndex BIGINT
+	SET @InoutIndex=SCOPE_IDENTITY()
+	
+	-- 更新记录
+	UPDATE THAccountsDB.dbo.AccountsOnlineStatus 
+	SET UserID=@UserID,ClientKind = 2,ServerName=N'注册', EnterID=@InoutIndex,EnterIP=@strClientIP, EnterMachine=@strMachineID
+	WHERE UserID=@UserID
+	
+	-- 插入记录
+	IF @@ROWCOUNT=0
+	BEGIN
+		INSERT INTO THAccountsDB.dbo.AccountsOnlineStatus(UserID,ClientKind, ServerName, EnterID, EnterIP, EnterMachine)
+		VALUES(@UserID,2, N'注册', @InoutIndex, @strClientIP, @strMachineID)
+	END
+	
+	-- 银行标识
+	DECLARE @InsureEnabled TINYINT
+	SET @InsureEnabled=0
+	IF @InsurePass <> '' SET @InsureEnabled=1
+
+	-- 代理标识
+	DECLARE @IsAgent TINYINT
+	SET @IsAgent =0
+	IF EXISTS (SELECT * FROM AccountsAgent WHERE UserID=@UserID) SET @IsAgent=1
+	
+	-- 输出变量
+	SELECT @UserID AS UserID, @GameID AS GameID, @Accounts AS Accounts, @NickName AS NickName,@DynamicPass AS DynamicPass,@UnderWrite AS UnderWrite,
+		@FaceID AS F
+GSP_GP_SystemFaceInsert	
+----------------------------------------------------------------------------------------------------
+
+-- 插入头像
+CREATE PROC GSP_GP_SystemFaceInsert
+	@dwUserID INT,								-- 用户标识
+	@strPassword NCHAR(32),						-- 用户密码
+	@wFaceID SMALLINT,							-- 头像标识
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineSerial NVARCHAR(32),				-- 机器标识
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 查询用户
+	DECLARE @LogonPass AS NCHAR(32)
+	SELECT @LogonPass=LogonPass FROM AccountsInfo(NOLOCK) WHERE UserID=@dwUserID
+
+	-- 密码判断
+	IF @LogonPass IS NULL OR @LogonPass<>@strPassword
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试！'
+		RETURN 1
+	END
+
+	-- 更新用户
+	UPDATE AccountsInfo SET FaceID=@wFaceID, CustomID=0 WHERE UserID=@dwUserID
+
+	-- 返回结果
+	SELECT @wFaceID AS FaceID
+
+END	
+
+RETURN 0
+
+
+GSP_GP_CustomFaceInsert	
+----------------------------------------------------------------------------------------------------
+
+-- 插入头像
+CREATE PROC GSP_GP_CustomFaceInsert
+	@dwUserID INT,								-- 用户标识
+	@strPassword NCHAR(32),						-- 用户密码
+	@cbCustomFace IMAGE,						-- 图像数据
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineSerial NVARCHAR(12),				-- 机器标识
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 查询用户
+	DECLARE @LogonPass AS NCHAR(32)
+	SELECT @LogonPass=LogonPass FROM AccountsInfo(NOLOCK) WHERE UserID=@dwUserID
+
+	-- 密码判断
+	IF @LogonPass IS NULL OR @LogonPass<>@strPassword
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试！'
+		RETURN 1
+	END
+
+	-- 插入头像
+	INSERT AccountsFace (UserID, CustomFace, InsertAddr, InsertMachine)
+	VALUES (@dwUserID, @cbCustomFace, @strClientIP, @strMachineSerial)
+
+	-- 更新用户
+	DECLARE @CustomID INT
+	SELECT @CustomID=SCOPE_IDENTITY()
+	UPDATE AccountsInfo SET CustomID=@CustomID WHERE UserID=@dwUserID
+
+	-- 返回结果
+	SELECT @CustomID AS CustomID
+
+END	
+
+RETURN 0
+
+
+GSP_GP_CustomFaceDelete	
+----------------------------------------------------------------------------------------------------
+
+-- 删除头像
+CREATE PROC GSP_GP_CustomFaceDelete 
+	@dwUserID INT,								-- 用户标识
+	@strPassword NCHAR(32),						-- 用户密码
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 查询用户
+	DECLARE @LogonPass AS NCHAR(32)
+	SELECT @LogonPass=LogonPass FROM AccountsInfo(NOLOCK) WHERE UserID=@dwUserID
+
+	-- 密码判断
+	IF @LogonPass<>@strPassword
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试！'
+		RETURN 1
+	END
+
+	-- 更新用户
+	UPDATE AccountsInfo SET CustomID=0 WHERE UserID=@dwUserID
+
+END	
+
+RETURN 0
+
+
+GSP_GP_LoadAgentGameKindItem	
+
+
+----------------------------------------------------------------------------------------------------
+
+-- 代理列表
+CREATE PROC GSP_GP_LoadAgentGameKindItem
+	@dwUserID INT,								-- 用户标识
+	@dwDeviceID INT,							-- 设备标识	
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN 
+
+	-- 查询信息
+	DECLARE @AgentID INT
+	SET @AgentID =0
+	SELECT @AgentID =AgentID FROM AccountsInfo WHERE @dwUserID = UserID 
+	
+	SELECT KindID ,SortID FROM AccountsAgentGame(NOLOCK) WHERE AgentID = @AgentID AND DeviceID = @dwDeviceID
+END
+
+
+GSP_GP_RealAuth	
+
+----------------------------------------------------------------------------------------------------
+
+-- 实名认证
+CREATE PROC GSP_GP_RealAuth
+	@dwUserID INT,								-- 用户 I D	
+	@strPassword NCHAR(32),						-- 用户密码
+	@strCompellation NVARCHAR(16),				-- 真实名字
+	@strPassPortID NVARCHAR(18),				-- 证件号码
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 查询信息
+	DECLARE @Password NCHAR(32)
+	SELECT @Password=LogonPass FROM AccountsInfo WHERE UserID=@dwUserID
+
+	-- 用户判断
+	IF @Password IS NULL
+	BEGIN 
+		SET @strErrorDescribe=N'用户信息不存在，认证失败！'
+		RETURN 1
+	END
+
+	-- 密码判断
+	IF @Password<>@strPassword
+	BEGIN 
+		SET @strErrorDescribe=N'帐号密码不正确，认证失败！'
+		RETURN 3
+	END
+
+	--简单验证
+	IF LEN(@strPassPortID) = 0 OR LEN(@strCompellation) = 0
+	BEGIN
+		SET @strErrorDescribe=N'证件号码或真实姓名不正确，认证失败！'
+		RETURN 4	
+	END	
+	
+	--重复验证
+	IF EXISTS (SELECT UserID FROM   THRecordDB.dbo.RecordAuthentPresent WHERE UserID=@dwUserID)
+	BEGIN
+		SET @strErrorDescribe=N'已经认证，认证失败！'
+		RETURN 5		
+	END
+	
+	-- 实名修改
+	UPDATE AccountsInfo SET  Compellation=@strCompellation, PassPortID=@strPassPortID 	WHERE UserID=@dwUserID
+	
+	-- 成功判断
+	IF @@ROWCOUNT=0
+	BEGIN
+		SET @strErrorDescribe=N'执行实名认证错误，请联系客户服务中心！'
+		RETURN 6
+	END
+	
+	-- 实名记录
+	INSERT INTO   THRecordDB.dbo.RecordAuthentPresent(UserID,PassPortID,Compellation,IpAddress) VALUES(@dwUserID,@strPassPortID,@strCompellation,@strClientIP)	
+
+	----查询奖励
+	--DECLARE @AuthentPresentCount AS BIGINT
+	--SELECT @AuthentPresentCount=StatusValue FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'AuthentPresent'
+	--IF @AuthentPresentCount IS NULL or @AuthentPresentCount=0
+	--BEGIN
+		SET @strErrorDescribe=N'恭喜您实名认证成功！'
+	--	RETURN 0		
+	--END	
+	
+	---- 查询金币
+	--DECLARE @CurrScore BIGINT
+	--DECLARE @CurrInsure BIGINT
+	--DECLARE @CurrMedal INT
+	--SELECT @CurrScore=Score,@CurrInsure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo  WHERE UserID=@dwUserID
+	--SELECT @CurrMedal=UserMedal FROM   THAccountsDB.dbo.AccountsInfo WHERE UserID=@dwUserID
+	
+	----发放奖励
+	--DECLARE @DateID INT
+	--SET @DateID=CAST(CAST(GETDATE() AS FLOAT) AS INT)
+	---- 赠送金币
+	--UPDATE   THTreasureDB.dbo.GameScoreInfo SET Score=Score+@AuthentPresentCount WHERE UserID=@dwUserID	
+	
+	---- 流水账
+	--INSERT INTO   THTreasureDB.dbo.RecordPresentInfo(UserID,PreScore,PreInsureScore,PresentScore,TypeID,IPAddress,CollectDate)
+	--VALUES (@dwUserID,@CurrScore,@CurrInsure,@AuthentPresentCount,8,@strClientIP,GETDATE())
+	
+	---- 日统计
+	--UPDATE   THTreasureDB.dbo.StreamPresentInfo SET DateID=@DateID, PresentCount=PresentCount+1,PresentScore=PresentScore+@AuthentPresentCount WHERE UserID=@dwUserID AND TypeID=8
+	--IF @@ROWCOUNT=0
+	--BEGIN
+	--	INSERT   THTreasureDB.dbo.StreamPresentInfo(DateID,UserID,TypeID,PresentCount,PresentScore) VALUES(@DateID,@dwUserID,8,1,@AuthentPresentCount)
+	--END	
+	---- 游戏信息
+	DECLARE @SourceScore BIGINT
+	SELECT @SourceScore=Score FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID=@dwUserID	
+	SELECT @SourceScore AS SourceScore
+	--SET @strErrorDescribe=N'实名认证成功，奖励金币'+ CAST(@AuthentPresentCount AS NVARCHAR)  +N'！'			 							
+	RETURN 0
+
+END
+
+
+GSP_GP_GetRecentlyPalyer	
+----------------------------------------------------------------------------------------------------
+
+-- 最近玩家
+CREATE PROC GSP_GP_GetRecentlyPalyer
+	@dwUserID INT							-- 用户 I D
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+	declare @sql varchar(1024)
+
+	SELECT @sql=ArrayUsers from THAccountsDB.dbo.AccountsRecentlyPlayer where UserID = @dwUserID
+
+	SELECT a.UserID,a.GameID,a.NickName,a.FaceID,a.CustomID,a.Gender,a.MemberOrder,a.GrowLevelID AS GrowLevel,ISNULL(a.UnderWrite,N'') AS UnderWrite,ISNULL(a.Compellation,N'') AS Compellation,
+     ISNULL(c.QQ,N'') AS QQ,ISNULL(c.EMail,N'') AS EMail,ISNULL(c.SeatPhone,N'')  AS SeatPhone,ISNULL(c.MobilePhone,N'')AS MobilePhone,
+	ISNULL(c.DwellingPlace,N'') AS DwellingPlace,ISNULL(c.PostalCode,N'')   AS PostalCode,ISNULL(c.WeChatURL,N'') as WeChatURL, ISNULL(c.CustomData,N'')   AS CustomData
+	FROM THAccountsDB.dbo.AccountsInfo a 
+	INNER JOIN (select * from THAccountsDB.dbo.F_SplitSTR(@sql,',')) b ON b.col=a.UserID 
+	LEFT OUTER JOIN THAccountsDB.dbo.IndividualDatum c ON c.UserID=a.UserID ORDER BY a.UserID		
+END
+
+RETURN 0
+
+
+GSP_GP_GetBlackList	----------------------------------------------------------------------------------------------------
+
+-- 得到黑名单
+
+CREATE PROC [dbo].[GSP_GP_GetBlackList]
+	@dwUserID INT							-- 用户 I D
+--  
+AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+	declare @sql_get varchar(1024)
+
+	SELECT @sql_get=BlackList from THAccountsDB.dbo.AccountBlackList where UserID = @dwUserID
+
+	SELECT a.UserID,a.GameID,a.NickName,a.FaceID,a.CustomID,a.Gender,a.MemberOrder,a.GrowLevelID AS GrowLevel,ISNULL(a.UnderWrite,N'') AS UnderWrite,ISNULL(a.Compellation,N'') AS Compellation,
+     ISNULL(c.QQ,N'') AS QQ,ISNULL(c.EMail,N'') AS EMail,ISNULL(c.SeatPhone,N'')  AS SeatPhone,ISNULL(c.MobilePhone,N'')AS MobilePhone,
+	ISNULL(c.DwellingPlace,N'') AS DwellingPlace,ISNULL(c.PostalCode,N'')   AS PostalCode,ISNULL(c.WeChatURL,N'')   AS WeChatURL, ISNULL(c.CustomData,N'')   AS CustomData
+	FROM THAccountsDB.dbo.AccountsInfo a 
+	INNER JOIN (select * from THAccountsDB.dbo.F_SplitSTR(@sql_get,',')) b ON b.col=a.UserID 
+	LEFT OUTER JOIN THAccountsDB.dbo.IndividualDatum c ON c.UserID=a.UserID ORDER BY a.UserID		
+END
+
+RETURN 0
+
+
+GSP_GP_AddMail	
+----------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------
+
+-- 添加邮件
+CREATE PROC [dbo].[GSP_GP_AddMail]
+	@dwTargetUserID INT, -- 目标 ID
+	@strMailContent NVARCHAR(2000),
+	@dwGoodID1 INT,
+	@dwCount1 INT,
+	@dwGoodID2 INT,
+	@dwCount2 INT,
+	@dwGoodID3 INT,
+	@dwCount3 INT,
+	@dwGoodID4 INT,
+	@dwCount4 INT,
+	@dwGoodID5 INT,
+	@dwCount5 INT
+	
+--  
+AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+	
+	IF EXISTS(SELECT * FROM THAccountsDB.dbo.AccountsInfo WHERE @dwTargetUserID=UserID)
+	BEGIN
+		INSERT THPlatformDB.dbo.GameMailDesc (MailContent,GoodID1,Count1,GoodID2,Count2,GoodID3,Count3,GoodID4,Count4,GoodID5,Count5)	
+		VALUES(@strMailContent,@dwGoodID1,@dwCount1,@dwGoodID2,@dwCount2,@dwGoodID3,@dwCount3,@dwGoodID4,@dwCount4,@dwGoodID5,@dwCount5)
+		DECLARE @dwInsertID INT
+		SET @dwInsertID=SCOPE_IDENTITY() 
+		IF @dwInsertID IS NOT NULL
+		BEGIN
+			INSERT THAccountsDB.dbo.AccountsMail(UserID,MailID,GetStatus,PutTime,SourceIDDesc,SourceID)
+			VALUES(@dwTargetUserID,@dwInsertID,0,GetDate(),0,0)
+		END
+	END
+	ELSE
+	BEGIN
+		RETURN 1
+	END
+			
+END
+
+RETURN 0
+
+
+GSP_GP_AddMailAll	----------------------------------------------------------------------------------------------------
+
+-- 添加邮件群发
+CREATE PROC [dbo].[GSP_GP_AddMailAll]
+	@strMailContent NVARCHAR(2000),
+	@dwGoodID1 INT,
+	@dwCount1 INT,
+	@dwGoodID2 INT,
+	@dwCount2 INT,
+	@dwGoodID3 INT,
+	@dwCount3 INT,
+	@dwGoodID4 INT,
+	@dwCount4 INT,
+	@dwGoodID5 INT,
+	@dwCount5 INT
+	
+--  
+AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+	
+	
+	
+		INSERT THPlatformDB.dbo.GameMailDesc (MailContent,GoodID1,Count1,GoodID2,Count2,GoodID3,Count3,GoodID4,Count4,GoodID5,Count5)	
+		VALUES(@strMailContent,@dwGoodID1,@dwCount1,@dwGoodID2,@dwCount2,@dwGoodID3,@dwCount3,@dwGoodID4,@dwCount4,@dwGoodID5,@dwCount5)
+		DECLARE @dwInsertID INT
+		SET @dwInsertID=SCOPE_IDENTITY() 
+		IF @dwInsertID IS NOT NULL
+		BEGIN
+			INSERT INTO THAccountsDB.dbo.AccountsMail(UserID,MailID,GetStatus,PutTime,SourceIDDesc,SourceID) SELECT UserID,@dwInsertID, 0,GetDate(),0,0 FROM THAccountsDB.dbo.AccountsInfo
+		END
+	
+			
+END
+
+RETURN 0
+
+
+GSP_GP_AddUserFriend	
+----------------------------------------------------------------------------------------------------
+-- 添加好友
+CREATE PROC GSP_GP_AddUserFriend
+	@dwUserID INT,								-- 用户 I D
+	@dwDestUserID INT,							-- 用户 I D
+	@cbGroupID SMALLINT,						-- 组别标识
+	@cbDestGroupID SMALLINT,					-- 组别标识
+	@cbLoadUserInfo TINYINT,					-- 加载标识
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+	
+	declare @sql NVARCHAR(1024)
+
+	declare @tmp1 NVARCHAR(64)
+	declare @blackListCount int
+	
+	SELECT @sql=BlackList from THAccountsDB.dbo.AccountBlackList where UserID = @dwUserID
+	
+	IF @sql IS NOT NULL
+	BEGIN
+		select * into #pingjie from THAccountsDB.dbo.F_SplitSTR(@sql,',')
+		IF Exists(SELECT * FROM #pingjie WHERE @dwDestUserID = col)
+		BEGIN
+			SET @strErrorDescribe = '添加的玩家已经在黑名单,不能添加好友'
+			RETURN 1
+		END
+		drop table #pingjie
+		
+	END	
+	
+	-- 存在判断
+	IF Exists(SELECT * FROM AccountsRelation WHERE MainUserID=@dwUserID AND SubUserID=@dwDestUserID)
+	BEGIN
+		UPDATE AccountsRelation SET GroupID=@cbGroupID WHERE MainUserID=@dwUserID AND SubUserID=@dwDestUserID
+	END
+	ELSE BEGIN
+		INSERT INTO AccountsRelation VALUES(@dwUserID,@dwDestUserID,@cbGroupID)		
+	END
+
+	-- 存在判断
+	IF Exists(SELECT * FROM AccountsRelation WHERE MainUserID=@dwDestUserID AND SubUserID=@dwUserID)
+	BEGIN
+		UPDATE AccountsRelation SET GroupID=@cbDestGroupID WHERE MainUserID=@dwDestUserID AND SubUserID=@dwUserID
+	END
+	ELSE BEGIN
+		INSERT INTO AccountsRelation VALUES(@dwDestUserID,@dwUserID,@cbGroupID)		
+	END
+
+	-- 加载用户信息
+	IF @cbLoadUserInfo=1 
+	BEGIN
+		-- 查询信息
+		SELECT a.UserID,a.NickName,a.FaceID,a.CustomID,a.Gender,a.MemberOrder,a.GrowLevelID AS GrowLevel,a.UnderWrite,a.Compellation,b.GroupID
+		FROM AccountsInfo a,AccountsRelation b WHERE MainUserID=@dwUserID AND SubUserID=@dwDestUserID
+	END
+END
+
+RETURN 0
+
+
+GSP_GP_DeleteUserFriend	
+----------------------------------------------------------------------------------------------------
+-- 删除好友
+CREATE PROC GSP_GP_DeleteUserFriend
+	@dwUserID INT,								-- 用户 I D
+	@dwDestUserID INT,							-- 用户 I D
+	@cbGroupID SMALLINT,						-- 组别标识
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+	
+	-- 变量定义
+	DECLARE @UserID INT
+	DECLARE @Nullity BIT
+	DECLARE @LogonPass AS NCHAR(32)
+
+	-- 查询用户
+	SELECT @UserID=UserID, @LogonPass=LogonPass, @Nullity=Nullity
+	FROM AccountsInfo(NOLOCK) WHERE UserID=@dwUserID
+
+	-- 查询用户
+	IF @UserID IS NULL
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试！'
+		RETURN 1
+	END	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+	
+
+	-- 移除好友
+	DECLARE @cbMainGroupID SMALLINT
+	SELECT @cbMainGroupID=GroupID FROM AccountsRelation WHERE MainUserID=@dwDestUserID AND SubUserID=@dwUserID
+	DELETE AccountsRelation WHERE MainUserID=@dwUserID AND SubUserID=@dwDestUserID
+	DELETE AccountsRelation WHERE MainUserID=@dwDestUserID AND SubUserID=@dwUserID
+
+	SET @strErrorDescribe=N'移除成功！'
+
+
+END
+
+RETURN 0
+
+
+GSP_GP_EfficacyAccountsChat	
+----------------------------------------------------------------------------------------------------
+
+-- 帐号登录
+CREATE PROC GSP_GP_EfficacyAccountsChat
+	@dwUserID INT,								-- 用户标识
+	@strPassword NCHAR(33),						-- 用户密码
+	@strClientIP nvarchar(15),	                -- 连接地址
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 基本信息
+DECLARE @UserID INT
+DECLARE @GameID INT
+DECLARE @NickName NVARCHAR(31)
+DECLARE @FaceID INT
+DECLARE @CustomID INT
+DECLARE @Gender TINYINT
+DECLARE @MemberOrder INT
+DECLARE @GrowLevel INT
+DECLARE @UnderWrite NVARCHAR(32)
+DECLARE @Compellation NVARCHAR(16)
+
+--用户资料
+DECLARE @QQ NVARCHAR(16)
+DECLARE @EMail NVARCHAR(16)
+DECLARE @SeatPhone NVARCHAR(32)
+DECLARE @MobilePhone NVARCHAR(16)
+DECLARE @DwellingPlace NVARCHAR(128)
+DECLARE @PostalCode NVARCHAR(8)
+
+-- 执行逻辑
+BEGIN
+
+	SET @GameID = 0
+	SET @UnderWrite=N''
+	SET @Compellation=N''
+    SET @QQ =N''
+    SET @EMail =N''
+    SET @SeatPhone =N''
+    SET @MobilePhone =N''
+    SET @DwellingPlace =N''
+    SET @PostalCode =N''
+
+	-- 查询用户
+	DECLARE @Nullity TINYINT
+	DECLARE @LogonPass AS NCHAR(32)
+	DECLARE @DynamicPass AS NCHAR(32)
+	SELECT @UserID= UserID ,@GameID=GameID,@NickName = NickName, @LogonPass= LogonPass,@DynamicPass = DynamicPass , @FaceID=  FaceID,@CustomID= CustomID,@Gender=Gender,
+	@MemberOrder =MemberOrder,@GrowLevel=GrowLevelID,@UnderWrite=UnderWrite,@Compellation =Compellation FROM AccountsInfo(NOLOCK) WHERE UserID=@dwUserID
+
+	-- 查询用户
+	IF @UserID IS NULL
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试登录！'
+		RETURN 1
+	END	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+
+	-- 密码判断
+	IF @DynamicPass<>@strPassword
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试登录！'
+		RETURN 3
+	END
+	SELECT @QQ = QQ,@EMail = EMail,@SeatPhone = SeatPhone,@MobilePhone = MobilePhone,@DwellingPlace = DwellingPlace ,
+	@PostalCode =PostalCode FROM IndividualDatum(NOLOCK)WHERE UserID=@dwUserID
+	
+	-- 输出变量
+	SELECT @UserID AS UserID,@GameID AS GameID, @NickName AS NickName, @FaceID AS FaceID, @CustomID AS CustomID, @Gender AS Gender, @MemberOrder AS MemberOrder,
+	@UnderWrite AS UnderWrite,@Compellation AS Compellation,@QQ AS QQ, @EMail AS EMail, @SeatPhone AS SeatPhone, @MobilePhone AS MobilePhone,
+	@DwellingPlace AS DwellingPlace,@PostalCode AS PostalCode,@GrowLevel AS GrowLevel
+
+END
+
+RETURN 0
+
+
+GSP_GP_LoadUserFriends	
+----------------------------------------------------------------------------------------------------
+
+-- 加载好友
+CREATE PROC GSP_GP_LoadUserFriends
+	@dwUserID INT,								-- 用户标识
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN 
+
+	-- 查询信息
+	SELECT a.UserID,a.GameID,a.NickName,a.FaceID,a.CustomID,a.Gender,a.MemberOrder,a.GrowLevelID AS GrowLevel,ISNULL(a.UnderWrite,N'') AS UnderWrite,ISNULL(a.Compellation,N'') AS Compellation,
+	b.GroupID,ISNULL(c.QQ,N'') AS QQ,ISNULL(c.EMail,N'') AS EMail,ISNULL(c.SeatPhone,N'')  AS SeatPhone,ISNULL(c.MobilePhone,N'')AS MobilePhone,
+	ISNULL(c.DwellingPlace,N'') AS DwellingPlace,ISNULL(c.PostalCode,N'')   AS PostalCode,ISNULL(c.WeChatURL,N'')   AS WeChatURL,ISNULL(c.CustomData,N'')   AS CustomData
+	FROM AccountsInfo a 
+	INNER JOIN AccountsRelation b ON b.MainUserID=@dwUserID	AND b.SubUserID=a.UserID 
+	LEFT OUTER JOIN IndividualDatum c ON c.UserID=a.UserID ORDER BY a.UserID
+END
+
+
+GSP_GP_SaveOfflineMessage	
+----------------------------------------------------------------------------------------------------
+
+-- 存储消息
+CREATE PROC GSP_GP_SaveOfflineMessage
+	@dwUserID INT,								-- 用户 I D
+	@wMessageType SMALLINT,						-- 消息类型
+	@wDataSize INT,								-- 数据大小
+	@szOfflineData varchar(2400),				-- 离线数据	
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+	DECLARE @dwTmp INT
+	SELECT @dwTmp=UserID FROM THAccountsDB.dbo.AccountsInfo WHERE UserID=@dwUserID
+	-- 插入数据
+	IF @dwTmp IS NOT NULL
+	BEGIN
+		INSERT OfflineMessage VALUES(@dwUserID,@wMessageType,@szOfflineData,@wDataSize)
+	END	
+END
+
+RETURN 0
+
+
+GSP_GP_SaveOfflineMessageGameID	
+----------------------------------------------------------------------------------------------------
+
+----------------------------------------------------------------------------------------------------
+
+-- 存储消息GameID
+CREATE PROC GSP_GP_SaveOfflineMessageGameID
+	@dwGameID INT,								-- 用户 GAME I D
+	@wMessageType SMALLINT,						-- 消息类型
+	@wDataSize INT,								-- 数据大小
+	@szOfflineData varchar(2400),				-- 离线数据	
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+	DECLARE @dwUserID INT
+	--查询是否有这个gameID
+	SELECT @dwUserID=UserID FROM THAccountsDB.dbo.AccountsInfo WHERE GameID=@dwGameID
+	-- 插入数据
+	IF @dwUserID IS NOT NULL
+	BEGIN
+		INSERT OfflineMessage VALUES(@dwUserID,@wMessageType,@szOfflineData,@wDataSize)
+	END	
+	
+END
+
+RETURN 0
+
+
+GSP_GP_SearchUser	
+----------------------------------------------------------------------------------------------------
+
+-- 修改密码
+CREATE PROC GSP_GP_SearchUser
+	@dwGameID INT						-- 用户账号
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+	-- 查询数据
+	SELECT UserID,GameID,FaceID,CustomID,Gender,MemberOrder,NickName,GrowLevelID AS GrowLevel,ISNULL(UnderWrite,N'') AS UnderWrite FROM AccountsInfo WHERE GameID=@dwGameID			
+END
+
+RETURN 0
+
+
+GSP_QueryControlInfo	
+----------------------------------------------------------------------------------------------------
+-- 控制查询
+CREATE PROC GSP_QueryControlInfo
+	@dwUserID INT								-- 用户 I D
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 控制信息
+DECLARE @WinRate SMALLINT
+DECLARE @ConsumeTime INT
+DECLARE @ControlType SMALLINT
+DECLARE @ControlStatus SMALLINT
+DECLARE @AddupWinScore BIGINT
+DECLARE @AddupLoseScore BIGINT
+DECLARE @ChangeScore BIGINT
+
+-- 执行逻辑
+BEGIN
+	
+	-- 查询控制
+	SELECT @ControlStatus=ControlStatus,@ControlType=ControlType,@ConsumeTime=ConsumeTimeCount,@WinRate=WinRate,
+	@AddupWinScore=WinScore,@AddupLoseScore=LoseScore,@ChangeScore=ChangeScore 
+	FROM AccountsControl WHERE UserID=@dwUserID
+	
+	-- 判断变量
+	IF @ControlStatus IS NULL
+	BEGIN
+
+		-- 设置变量
+		SELECT @ControlStatus=0, @ControlType=0, @ConsumeTime=0, @WinRate=0,@ChangeScore=0
+	
+		-- 累计输赢		
+		SELECT @AddupWinScore=AddupWinScore,@AddupLoseScore=AddupLoseScore FROM AccountsInfo WHERE UserID=@dwUserID	
+	END
+
+	-- 抛出数据
+	SELECT @ControlStatus AS ControlStatus, @ControlType AS ControlType, @ConsumeTime AS ConsumeTime, @WinRate AS WinRate,
+		   @AddupWinScore AS AddupWinScore, @AddupLoseScore AS AddupLoseScore, @ChangeScore AS ChangeScore
+END
+
+RETURN 0
+
+
+GSP_UpdateControlInfo	
+----------------------------------------------------------------------------------------------------
+
+-- 更新控制
+CREATE PROC GSP_UpdateControlInfo
+	@dwUserID INT,								-- 用户 I D	
+	@dwConsumeTime INT,							-- 消耗时间
+	@cbControlStatus SMALLINT,					-- 控制状态
+	@lAddupWinScore BIGINT,						-- 累计赢分
+	@lAddupLoseScore BIGINT						-- 累计输分
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 控制信息
+DECLARE @ChangeScore BIGINT
+DECLARE @ControlType SMALLINT	
+DECLARE @ControlStatus SMALLINT	
+DECLARE @SustainedTimeCount INT
+
+-- 执行逻辑
+BEGIN
+
+	-- 查询控制	
+	SELECT @ControlStatus=ControlStatus, @ControlType=ControlType, @SustainedTimeCount=SustainedTimeCount, @ChangeScore=ChangeScore  
+	FROM AccountsControl WHERE UserID=@dwUserID
+	
+	-- 存在判断
+	IF @ControlStatus IS NOT NULL
+	BEGIN	
+		-- 状态判断
+		IF @ControlStatus = @cbControlStatus		
+		BEGIN
+			-- 变量定义
+			DECLARE @ConcludeControl TINYINT
+			SET @ConcludeControl=0
+				
+			-- 分数控制
+			IF @ControlType = 1			
+			BEGIN
+				-- 黑名单用户
+				IF (@cbControlStatus = 1) AND (@lAddupLoseScore - @lAddupWinScore >= @ChangeScore)
+				BEGIN
+					SET @ConcludeControl=1	
+				END
+
+				-- 白名单用户
+				IF (@cbControlStatus = 2) AND (@lAddupWinScore - @lAddupLoseScore >= @ChangeScore)
+				BEGIN
+					SET @ConcludeControl=1
+				END
+			END
+
+			-- 时间控制
+			IF @ControlType = 2			
+			BEGIN
+				IF @dwConsumeTime >= @SustainedTimeCount SET @ConcludeControl=1
+			END
+
+			-- 结束控制
+			IF @ConcludeControl = 1
+			BEGIN
+				-- 插入记录
+				INSERT INTO AccountsControlRecord(UserID, Accounts, ControlStatus, ControlType, ChangeScore, SustainedTimeCount, ConsumeTimeCount, 
+				ConcludeType, StartDateTime, ConcludeDateTime, WinRate, WinScore, LoseScore) 
+				SELECT UserID, Accounts, ControlStatus, ControlType, ChangeScore, SustainedTimeCount, @dwConsumeTime, 1, ActiveDateTime, GetDate(),
+				WinRate, @lAddupWinScore, @lAddupLoseScore FROM AccountsControl WHERE UserID=@dwUserID						
+				
+				-- 重置信息
+				UPDATE AccountsInfo SET AddupWinScore=0,AddupLoseScore=0 WHERE UserID=@dwUserID
+
+				-- 删除控制
+				DELETE AccountsControl WHERE UserID=@dwUserID
+
+			END	ELSE
+			BEGIN
+				-- 更新信息
+				UPDATE AccountsControl SET ConsumeTimeCount=@dwConsumeTime, WinScore=@lAddupWinScore, LoseScore=@lAddupLoseScore 
+				WHERE UserID=@dwUserID
+			END		 	  				
+		END				
+	END	ELSE
+	BEGIN
+		-- 判断状态
+		IF @cbControlStatus > 0
+		BEGIN
+			-- 读取配置
+			DECLARE	@WinRate SMALLINT
+			DECLARE @Accounts nvarchar(31)
+			DECLARE @AutoControlEnable TINYINT
+	
+			-- 黑名单用户
+			IF @cbControlStatus = 1
+			BEGIN			
+				SELECT @AutoControlEnable = AutoControlEnable, @SustainedTimeCount=BSustainedTimeCount, @ControlType=BlackControlType, @ChangeScore=QuitBlackLoseScore, 
+				@WinRate=BlackWinRate FROM ControlConfig					
+			END
+
+			-- 白名单用户
+			IF @cbControlStatus = 2
+			BEGIN
+				SELECT @AutoControlEnable = AutoControlEnable,@SustainedTimeCount=WSustainedTimeCount, @ControlType=WhiteControlType, @ChangeScore=QuitWhiteWinScore,
+				@WinRate=WhiteWinRate FROM ControlConfig					
+			END	
+			
+			--自动控制
+			IF @AutoControlEnable = 1
+			BEGIN
+				-- 查询昵称
+				SELECT @Accounts=Accounts FROM AccountsInfo WHERE UserID=@dwUserID
+
+				-- 插入记录
+				INSERT INTO AccountsControl(UserID, Accounts, ActiveDateTime, ControlStatus, ControlType, ChangeScore, 
+				SustainedTimeCount, ConsumeTimeCount, WinRate, WinScore, LoseScore)
+				VALUES(@dwUserID, @Accounts, GETDATE(), @cbControlStatus, @ControlType, @ChangeScore, @SustainedTimeCount, 0, @WinRate, 0, 0)
+			END			
+			
+		END	ELSE
+		BEGIN
+			-- 累计输赢
+			UPDATE AccountsInfo SET AddupWinScore=@lAddupWinScore, AddupLoseScore=@lAddupLoseScore WHERE UserID=@dwUserID
+		END		
+	END	
+
+	-- 查询控制
+	DECLARE @OutWinRate SMALLINT	
+	DECLARE @OutControlType SMALLINT	
+	DECLARE @OutControlStatus SMALLINT	
+	--DECLARE @ChangeScore BIGINT
+	SELECT @OutControlStatus=ControlStatus, @OutControlType=ControlType, @OutWinRate=WinRate,@ChangeScore=ChangeScore FROM AccountsControl WHERE UserID=@dwUserID
+
+	--
+GSP_GP_MoorMachine	
+----------------------------------------------------------------------------------------------------
+
+-- 绑定机器
+CREATE PROC GSP_GP_MoorMachine
+	@dwUserID INT,								-- 用户 I D	
+	@strPassword NCHAR(32),						-- 用户密码
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineSerial NVARCHAR(32),				-- 机器标识
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 查询信息
+	DECLARE @Password NCHAR(32)
+	DECLARE @MoorMachine AS TINYINT
+	DECLARE	@MachineSerial NCHAR(32)
+	SELECT @Password=InsurePass, @MoorMachine=MoorMachine, @MachineSerial=LastLogonMachine FROM AccountsInfo WHERE UserID=@dwUserID
+
+	-- 用户判断
+	IF @Password IS NULL
+	BEGIN 
+		SET @strErrorDescribe=N'用户信息不存在，机器绑定失败！'
+		RETURN 1
+	END
+
+	IF LEN(@Password)=0
+	BEGIN 
+		SET @strErrorDescribe=N'机器绑定失败，请先设置您的银行密码！'
+		RETURN 5
+	END	
+
+	-- 绑定判断
+	IF @MoorMachine=1 AND @MachineSerial<>@strMachineSerial
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号已经绑定了其他机器了，必须解除后才能进行本机绑定操作！'
+		RETURN 2
+	END
+
+	-- 密码判断
+	IF @Password<>@strPassword
+	BEGIN 
+		SET @strErrorDescribe=N'由于您输入的银行密码不正确，机器绑定失败！'
+		RETURN 3
+	END
+
+	-- 绑定操作
+	UPDATE AccountsInfo SET MoorMachine=1, LastLogonMachine=@strMachineSerial WHERE UserID=@dwUserID
+
+	-- 成功判断
+	IF @@ROWCOUNT=0
+	BEGIN 
+		SET @strErrorDescribe=N'帐号绑定操作执行错误，请联系客户服务中心！'
+		RETURN 4
+	END
+
+	-- 输出信息
+	SET @strErrorDescribe=N'您的帐号与此机器绑定成功了，若需要解除绑定需在本机器进行！'
+	
+	RETURN 0
+
+END
+
+
+GSP_GP_UnMoorMachine	
+----------------------------------------------------------------------------------------------------
+
+-- 解除绑定
+CREATE PROC GSP_GP_UnMoorMachine
+	@dwUserID INT,								-- 用户 I D	
+	@strPassword NCHAR(32),						-- 用户密码
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineSerial NVARCHAR(32),				-- 机器标识
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 查询信息
+	DECLARE @Password NCHAR(32)
+	DECLARE @MoorMachine AS TINYINT
+	DECLARE	@MachineSerial NCHAR(32)
+	SELECT @Password=InsurePass, @MoorMachine=MoorMachine, @MachineSerial=LastLogonMachine FROM AccountsInfo WHERE UserID=@dwUserID
+
+	-- 用户判断
+	IF @MachineSerial IS NULL
+	BEGIN 
+		SET @strErrorDescribe=N'用户信息不存在，机器绑定失败！'
+		RETURN 1
+	END
+
+	-- 本机判断
+	IF @MoorMachine=1 AND @MachineSerial<>@strMachineSerial
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号与其他机器进行了绑定，机器解除绑定失败！'
+		RETURN 5
+	END
+
+	-- 密码判断
+	IF @Password<>@strPassword
+	BEGIN
+		SET @strErrorDescribe=N'由于您输入的银行密码不正确，机器解除绑定失败！'
+		RETURN 3
+	END
+
+	-- 解除操作
+	UPDATE AccountsInfo SET MoorMachine=0 WHERE UserID=@dwUserID
+
+	-- 成功判断
+	IF @@ROWCOUNT=0
+	BEGIN 
+		SET @strErrorDescribe=N'帐号解除绑定操作执行错误，请联系客户服务中心！'
+		RETURN 4
+	END
+
+	-- 输出信息
+	SET @strErrorDescribe=N'您的帐号与机器解除绑定成功了！'
+	
+	RETURN 0
+
+END
+
+
+GSP_GP_EfficacyGameID	
+----------------------------------------------------------------------------------------------------
+
+-- I D 登录
+CREATE PROC GSP_GP_EfficacyGameID
+	@dwGameID INT,								-- 游戏 I D
+	@strPassword NCHAR(32),						-- 用户密码
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineID NVARCHAR(32),					-- 机器标识
+	@nNeeValidateMBCard BIT,					-- 密保校验
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 基本信息
+DECLARE @UserID INT
+DECLARE @FaceID SMALLINT
+DECLARE @CustomID INT
+DECLARE @Accounts NVARCHAR(31)
+DECLARE @NickName NVARCHAR(31)
+DECLARE @UnderWrite NVARCHAR(63)
+
+-- 积分变量
+DECLARE @Score DECIMAL(18,2)
+DECLARE @Insure DECIMAL(18,2)
+
+-- 扩展信息
+DECLARE @GameID INT
+DECLARE @Gender TINYINT
+DECLARE @UserMedal INT
+DECLARE @Experience INT
+DECLARE @LoveLiness INT
+DECLARE @MasterRight INT
+DECLARE @MemberOrder SMALLINT
+DECLARE @MemberOverDate DATETIME
+DECLARE @MemberSwitchDate DATETIME
+DECLARE @ProtectID INT
+DECLARE @PasswordID INT
+
+-- 辅助变量
+DECLARE @EnjoinLogon AS INT
+
+-- 执行逻辑
+BEGIN
+	-- 系统暂停
+	SELECT @EnjoinLogon=StatusValue FROM SystemStatusInfo WHERE StatusName=N'EnjoinLogon'
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SELECT @strErrorDescribe=StatusString FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+		RETURN 2
+	END
+
+	-- 效验地址
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineAddress(NOLOCK) WHERE AddrString=@strClientIP AND GETDATE()<EnjoinOverDate
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您所在的 IP 地址的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 4
+	END
+	
+	-- 效验机器
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineMachine(NOLOCK) WHERE MachineSerial=@strMachineID AND GETDATE()<EnjoinOverDate
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您的机器的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 7
+	END
+ 
+	-- 查询用户
+	DECLARE @Nullity TINYINT
+	DECLARE @StunDown TINYINT
+	DECLARE @LogonPass AS NCHAR(32)
+	DECLARE	@MachineSerial NCHAR(32)
+	DECLARE @MoorMachine AS TINYINT
+	DECLARE @MasterOrder AS TINYINT
+	SELECT @UserID=UserID, @GameID=GameID, @Accounts=Accounts, @NickName=NickName, @UnderWrite=UnderWrite, @LogonPass=LogonPass,
+		@FaceID=FaceID, @CustomID=CustomID, @Gender=Gender, @Nullity=Nullity, @StunDown=StunDown, @UserMedal=UserMedal, @Experience=Experience,
+		@LoveLiness=LoveLiness,@MasterRight=MasterRight, @MemberOrder=MemberOrder, @MemberOverDate=MemberOverDate, @MemberSwitchDate=MemberSwitchDate,
+		@MoorMachine=MoorMachine,@MasterOrder=MasterOrder, @MachineSerial=LastLogonMachine,@PasswordID=PasswordID,@ProtectID=ProtectID
+	FROM AccountsInfo(NOLOCK) WHERE GameID=@dwGameID
+
+	-- 系统暂停
+	SELECT @EnjoinLogon=StatusValue FROM SystemStatusInfo WHERE StatusName=N'EnjoinLogon'
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0 and @MasterOrder = 0
+	BEGIN
+		SELECT @strErrorDescribe=StatusString FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+		RETURN 2
+	END
+	
+	-- 查询用户
+	IF @UserID IS NULL
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试登录！'
+		RETURN 1
+	END	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+
+	-- 帐号关闭
+	IF @StunDown<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号使用了安全关闭功能，必须重新开通后才能继续使用！'
+		RETURN 2
+	END	
+	
+	-- 固定机器
+	IF @MoorMachine=1
+	BEGIN
+		IF @MachineSerial<>@strMachineID
+		BEGIN
+			SET @strErrorDescribe=N'您的帐号使用固定机器登录功能，您现所使用的机器不是所指定的机器！'
+			RETURN 1
+		END
+	END
+
+	-- 密码判断
+	IF @LogonPass<>@strPassword
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试登录！'
+		RETURN 3
+	END
+
+	-- 密保校验
+	IF @nNeeValidateMBCard=1 AND @PasswordID<>0
+	BEGIN
+		SELECT @PasswordID AS PasswordID
+		RETURN 18
+	END
+
+	-- 固定机器
+	IF @MoorMachine=2
+	BEGIN
+		SET @MoorMachine=1
+		SET @strErrorDescribe=N'您的帐号成功使用了固定机器登录功能！'
+		UPDATE AccountsInfo SET MoorMachine=@MoorMachine, LastLogonMachine=@strMachineID WHERE UserID=@UserID
+	END
+
+	-- 查询金币
+	SELECT @Score=Score
+GSP_GP_EfficacyGameID	, @Insure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID=@UserID
+
+	-- 数据调整
+	IF @Score IS NULL SET @Score=0
+	IF @Insure IS NULL SET @Insure=0
+
+	-- 会员等级
+	IF @MemberOrder<>0 AND GETDATE()>@MemberSwitchDate
+	BEGIN
+		-- 删除会员
+		DELETE AccountsMember WHERE UserID=@UserID AND MemberOverDate<=GETDATE()
+
+		-- 搜索会员
+		SELECT @MemberOverDate=MAX(MemberOverDate), @MemberOrder=MAX(MemberOrder), @MemberSwitchDate=MIN(MemberOverDate)
+			FROM AccountsMember(NOLOCK) WHERE UserID=@UserID
+
+		-- 数据调整
+		IF @MemberOrder IS NULL SET @MemberOrder=0
+		IF @MemberOverDate IS NULL SET @MemberOverDate='1980-1-1'
+		IF @MemberSwitchDate IS NULL SET @MemberSwitchDate='1980-1-1'
+
+		-- 更新数据
+		UPDATE AccountsInfo SET MemberOrder=@MemberOrder, MemberOverDate=@MemberOverDate, MemberSwitchDate=@MemberSwitchDate
+			WHERE UserID=@UserID
+	END
+
+	-- 更新信息
+	UPDATE AccountsInfo SET GameLogonTimes=GameLogonTimes+1, LastLogonDate=GETDATE(), LastLogonIP=@strClientIP, 
+		LastLogonMachine=@strMachineID WHERE UserID=@UserID
+
+	-- 记录日志
+	DECLARE @DateID INT
+	SET @DateID=CAST(CAST(GETDATE() AS FLOAT) AS INT)
+	UPDATE SystemStreamInfo SET GameLogonSuccess=GameLogonSuccess+1 WHERE DateID=@DateID
+	IF @@ROWCOUNT=0 INSERT SystemStreamInfo (DateID, GameLogonSuccess) VALUES (@DateID, 1)
+
+	-- 输出变量
+	SELECT @UserID AS UserID, @GameID AS GameID, @Accounts AS Accounts, @NickName AS NickName, @UnderWrite AS UnderWrite,
+		@FaceID AS FaceID, @CustomID AS CustomID, @Gender AS Gender, @UserMedal AS UserMedal, @Experience AS Experience,
+		@Score AS Score, @Insure AS Insure, @LoveLiness AS LoveLiness, @MasterRight AS MasterRight, @MemberOrder AS MemberOrder, @MemberOverDate AS MemberOverDate,
+		@MoorMachine AS MoorMachine,@MasterOrder AS MasterOrder,@PasswordID as PasswordID
+
+END
+
+RETURN 0
+
+
+GSP_MB_EfficacyGameID	
+----------------------------------------------------------------------------------------------------
+
+-- I D 登录
+CREATE PROC GSP_MB_EfficacyGameID
+	@dwGameID INT,								-- 游戏 I D
+	@strPassword NCHAR(32),						-- 用户密码
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineID NVARCHAR(32),					-- 机器标识
+	@strMobilePhone NVARCHAR(11),				-- 手机号码
+	@strErrorDescribe NVARCHAR(127) OUTPUT		-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 基本信息
+DECLARE @UserID INT
+DECLARE @FaceID SMALLINT
+DECLARE @CustomID INT
+DECLARE @Accounts NVARCHAR(31)
+DECLARE @NickName NVARCHAR(31)
+DECLARE @UnderWrite NVARCHAR(63)
+
+-- 积分变量
+DECLARE @Score DECIMAL(18,2)
+DECLARE @Insure DECIMAL(18,2)
+
+-- 扩展信息
+DECLARE @GameID INT
+DECLARE @Gender TINYINT
+DECLARE @UserMedal INT
+DECLARE @Experience INT
+DECLARE @LoveLiness INT
+DECLARE @MemberOrder SMALLINT
+DECLARE @MemberOverDate DATETIME
+DECLARE @MemberSwitchDate DATETIME
+
+-- 辅助变量
+DECLARE @EnjoinLogon AS INT
+
+-- 执行逻辑
+BEGIN
+	-- 系统暂停
+	SELECT @EnjoinLogon=StatusValue FROM SystemStatusInfo WHERE StatusName=N'EnjoinLogon'
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SELECT @strErrorDescribe=StatusString FROM SystemStatusInfo(NOLOCK) WHERE StatusName=N'EnjoinLogon'
+		RETURN 2
+	END
+
+	-- 效验地址
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineAddress(NOLOCK) WHERE AddrString=@strClientIP AND GETDATE()<EnjoinOverDate
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您所在的 IP 地址的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 4
+	END
+	
+	-- 效验机器
+	SELECT @EnjoinLogon=EnjoinLogon FROM ConfineMachine(NOLOCK) WHERE MachineSerial=@strMachineID AND GETDATE()<EnjoinOverDate
+	IF @EnjoinLogon IS NOT NULL AND @EnjoinLogon<>0
+	BEGIN
+		SET @strErrorDescribe=N'抱歉地通知您，系统禁止了您的机器的登录功能，请联系客户服务中心了解详细情况！'
+		RETURN 7
+	END
+
+	-- 查询用户
+	DECLARE @Nullity TINYINT
+	DECLARE @StunDown TINYINT
+	DECLARE @LogonPass AS NCHAR(32)
+	DECLARE	@MachineSerial NCHAR(32)
+	DECLARE @MoorMachine AS TINYINT
+	SELECT @UserID=UserID, @GameID=GameID, @Accounts=Accounts, @NickName=NickName, @UnderWrite=UnderWrite, @LogonPass=LogonPass,
+		@FaceID=FaceID, @CustomID=CustomID, @Gender=Gender, @Nullity=Nullity, @StunDown=StunDown, @UserMedal=UserMedal, @Experience=Experience,
+		@LoveLiness=LoveLiness, @MemberOrder=MemberOrder, @MemberOverDate=MemberOverDate, @MemberSwitchDate=MemberSwitchDate,
+		@MoorMachine=MoorMachine, @MachineSerial=LastLogonMachine
+	FROM AccountsInfo(NOLOCK) WHERE GameID=@dwGameID
+
+	-- 查询用户
+	IF @UserID IS NULL
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试登录！'
+		RETURN 1
+	END	
+
+	-- 帐号禁止
+	IF @Nullity<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号暂时处于冻结状态，请联系客户服务中心了解详细情况！'
+		RETURN 2
+	END	
+
+	-- 帐号关闭
+	IF @StunDown<>0
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号使用了安全关闭功能，必须重新开通后才能继续使用！'
+		RETURN 2
+	END	
+	
+	-- 固定机器
+	IF @MoorMachine=1
+	BEGIN
+		IF @MachineSerial<>@strMachineID
+		BEGIN
+			SET @strErrorDescribe=N'您的帐号使用固定机器登录功能，您现所使用的机器不是所指定的机器！'
+			RETURN 1
+		END
+	END
+
+	-- 密码判断
+	IF @LogonPass<>@strPassword
+	BEGIN
+		SET @strErrorDescribe=N'您的帐号不存在或者密码输入有误，请查证后再次尝试登录！'
+		RETURN 3
+	END
+
+	-- 查询金币
+	SELECT @Score=Score, @Insure=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID=@UserID
+
+	-- 数据调整
+	IF @Score IS NULL SET @Score=0
+	IF @Insure IS NULL SET @Insure=0
+
+	-- 会员等级
+	IF @MemberOrder<>0 AND GETDATE()>@MemberSwitchDate
+	BEGIN
+		-- 删除会员
+		DELETE AccountsMember WHERE UserID=@UserID AND MemberOverDate<=GETDATE()
+
+		-- 搜索会员
+		SELECT @MemberOverDate=MAX(MemberOverDate), @MemberOrder=MAX(MemberOrder), @MemberSwitchDate=MIN(MemberOverDate)
+			FROM AccountsMember(NOLOCK) WHERE UserID=@UserID
+
+		-- 数据调整
+		IF @MemberOrder IS NULL SET @MemberOrder=0
+		IF @MemberOverDate IS NULL SET @MemberOverDate='1980-1-1'
+		IF @MemberSwitchDate IS NULL SET @MemberSwitchDate='1980-1-1'
+
+		-- 更新数据
+		UPDATE AccountsInfo SET MemberOrder=@MemberOrder, MemberOverDate=@MemberOverDate, MemberSwitchDate=@MemberSwitchDate
+			WHERE UserID=@Use
+GSP_MB_EfficacyGameID	rID
+	END
+
+	-- 更新信息
+	UPDATE AccountsInfo SET GameLogonTimes=GameLogonTimes+1,LastLogonDate=GETDATE(), LastLogonIP=@strClientIP,
+		LastLogonMachine=@strMachineID, LastLogonMobile=@strMobilePhone WHERE UserID=@UserID
+
+	-- 记录日志
+	DECLARE @DateID INT
+	SET @DateID=CAST(CAST(GETDATE() AS FLOAT) AS INT)
+	UPDATE SystemStreamInfo SET GameLogonSuccess=GameLogonSuccess+1 WHERE DateID=@DateID
+	IF @@ROWCOUNT=0 INSERT SystemStreamInfo (DateID, GameLogonSuccess) VALUES (@DateID, 1)
+
+	-- 输出变量
+	SELECT @UserID AS UserID, @GameID AS GameID, @Accounts AS Accounts, @NickName AS NickName, @UnderWrite AS UnderWrite,
+		@FaceID AS FaceID, @CustomID AS CustomID, @Gender AS Gender, @UserMedal AS UserMedal, @Experience AS Experience,
+		@Score AS Score, @Insure AS Insure, @LoveLiness AS LoveLiness, @MemberOrder AS MemberOrder, @MemberOverDate AS MemberOverDate,
+		@MoorMachine AS MoorMachine
+
+END
+
+RETURN 0
+
+
+GSP_GP_QueryGrowLevel	
+----------------------------------------------------------------------------------------------------
+-- 查询等级
+CREATE PROC GSP_GP_QueryGrowLevel
+	@dwUserID INT,								-- 用户 I D
+	@strPassword NCHAR(32),						-- 用户密码	
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineID NVARCHAR(32),					-- 机器标识
+	@strUpgradeDescribe NVARCHAR(127) OUTPUT	-- 输出信息
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 财富变量
+DECLARE @Score BIGINT
+DECLARE @Ingot BIGINT
+
+-- 执行逻辑
+BEGIN
+	
+	-- 变量定义
+	DECLARE @Experience BIGINT
+	DECLARE	@GrowlevelID INT	
+
+	-- 查询用户
+	SELECT @Experience=Experience,@GrowlevelID=GrowLevelID FROM AccountsInfo 
+	WHERE UserID=@dwUserID AND LogonPass=@strPassword
+
+	-- 存在判断
+	IF @Experience IS NULL OR @GrowlevelID IS NULL
+	BEGIN
+		return 1
+	END
+
+	-- 升级判断
+	DECLARE @NowGrowLevelID INT
+	SELECT TOP 1 @NowGrowLevelID=LevelID FROM   THPlatformDB.dbo.GrowLevelConfig
+	WHERE @Experience>=Experience ORDER BY LevelID DESC
+
+	-- 调整变量
+	IF @NowGrowLevelID IS NULL
+	BEGIN
+		SET @NowGrowLevelID=@GrowlevelID														
+	END
+
+	-- 升级处理
+	IF @NowGrowLevelID>@GrowlevelID
+	BEGIN
+		DECLARE @UpgradeLevelCount INT
+		DECLARE	@RewardGold BIGINT
+		DECLARE	@RewardIngot BIGINT
+		
+		-- 升级增量
+		SET @UpgradeLevelCount=@NowGrowLevelID-@GrowlevelID
+		
+		-- 查询奖励
+		SELECT @RewardGold=SUM(RewardGold),@RewardIngot=SUM(RewardMedal) FROM   THPlatformDB.dbo.GrowLevelConfig
+		WHERE LevelID>@GrowlevelID AND LevelID<=@NowGrowLevelID
+
+		-- 调整变量
+		IF @RewardGold IS NULL SET @RewardGold=0				
+		IF @RewardIngot IS NULL SET @RewardIngot=0
+
+		-- 更新金币
+		UPDATE   THTreasureDB.dbo.GameScoreInfo SET Score=Score+@RewardGold WHERE UserID=@dwUserID
+		IF @@rowcount = 0
+		BEGIN
+			-- 插入资料
+			INSERT INTO   THTreasureDB.dbo.GameScoreInfo (UserID,Score,LastLogonIP, LastLogonMachine, RegisterIP, RegisterMachine)
+			VALUES (@dwUserID, @RewardGold, @strClientIP, @strMachineID, @strClientIP, @strMachineID)		
+		END		
+
+		-- 更新等级
+		UPDATE AccountsInfo SET UserMedal=UserMedal+@RewardIngot,GrowLevelID=@NowGrowLevelID WHERE UserID=@dwUserID
+
+		-- 升级提示
+		SET @strUpgradeDescribe = N'恭喜您升为'+CAST(@NowGrowLevelID AS NVARCHAR)+N'级，系统奖励游戏币 '+CAST(@RewardGold AS NVARCHAR)+N' ,元宝 '+CAST(@RewardIngot AS NVARCHAR)
+
+		-- 设置变量
+		SET @GrowlevelID=@NowGrowLevelID		
+	END
+
+	DECLARE @QuerylevelID INT
+	SET @QuerylevelID=@GrowlevelID
+	IF @GrowlevelID=0 SET @QuerylevelID=1
+
+	-- 下一等级	
+	DECLARE	@UpgradeRewardGold BIGINT
+	DECLARE	@UpgradeRewardMedal BIGINT
+	DECLARE @UpgradeExperience BIGINT	
+	SELECT @UpgradeExperience=Experience,@UpgradeRewardGold=RewardGold,@UpgradeRewardMedal=RewardMedal FROM   THPlatformDB.dbo.GrowLevelConfig
+	WHERE LevelID=@QuerylevelID+1
+	
+	-- 调整变量
+	IF @UpgradeExperience IS NULL SET @UpgradeExperience=0
+	IF @UpgradeRewardGold IS NULL SET @UpgradeRewardGold=0
+	IF @UpgradeRewardMedal IS NULL SET @UpgradeRewardMedal=0
+
+	-- 查询游戏币
+	SELECT @Score=Score FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID=@dwUserID
+	
+	-- 查询元宝	
+	SELECT @Ingot=UserMedal FROM AccountsInfo WHERE UserID=@dwUserID
+
+	-- 抛出数据
+	SELECT @GrowlevelID AS CurrLevelID,@Experience AS Experience,@UpgradeExperience AS UpgradeExperience, @UpgradeRewardGold AS RewardGold,
+		   @UpgradeRewardMedal AS RewardMedal,@Score AS Score,@Ingot AS Ingot
+END
+
+RETURN 0
+
+
+GSP_GP_TakeBaseEnsure	
+----------------------------------------------------------------------------------------------------
+
+-- 领取低保
+CREATE PROC GSP_GP_TakeBaseEnsure
+	@dwUserID INT,								-- 用户 I D
+	@strPassword NCHAR(32),						-- 用户密码
+	@strClientIP NVARCHAR(15),					-- 连接地址
+	@strMachineID NVARCHAR(32),					-- 机器标识
+	@strNotifyContent NVARCHAR(127) OUTPUT		-- 提示内容
+  AS
+
+-- 属性设置
+SET NOCOUNT ON
+
+-- 执行逻辑
+BEGIN
+
+	-- 查询用户
+	IF not exists(SELECT * FROM AccountsInfo WHERE UserID=@dwUserID AND LogonPass=@strPassword)
+	BEGIN
+		SET @strNotifyContent = N'抱歉，你的用户信息不存在或者密码不正确！'
+		return 1
+	END
+
+	-- 领取条件
+	DECLARE @ScoreCondition AS BIGINT
+	SELECT @ScoreCondition=StatusValue FROM SystemStatusInfo WHERE StatusName=N'SubsistenceAllowancesCondition'
+	IF @ScoreCondition IS NULL SET @ScoreCondition=0
+
+	-- 领取次数
+	DECLARE @TakeTimes AS SMALLINT
+	SELECT @TakeTimes=StatusValue FROM SystemStatusInfo WHERE StatusName=N'SubsistenceAllowancesNumber'
+	IF @TakeTimes IS NULL SET @TakeTimes=0
+
+	-- 领取数量
+	DECLARE @ScoreAmount AS BIGINT
+	SELECT @ScoreAmount=StatusValue FROM SystemStatusInfo WHERE StatusName=N'SubsistenceAllowancesGold'
+	IF @ScoreAmount IS NULL SET @ScoreAmount=0
+
+	-- 读取金币
+	DECLARE @Score BIGINT
+	DECLARE @InsureScore BIGINT
+	SELECT @Score=Score,@InsureScore=InsureScore FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID=@dwUserID
+	IF @@rowcount = 0
+	BEGIN
+		-- 插入资料
+		INSERT INTO   THTreasureDB.dbo.GameScoreInfo (UserID,Score,LastLogonIP, LastLogonMachine, RegisterIP, RegisterMachine)
+		VALUES (@dwUserID, 0, @strClientIP, @strMachineID, @strClientIP, @strMachineID)
+
+		-- 设置金币
+		SELECT @Score=0,@InsureScore=0
+	END
+
+	-- 调整金币	
+	SET @Score = @Score + @InsureScore
+
+	-- 领取判断
+	IF @Score >= @ScoreCondition
+	BEGIN
+		SET @strNotifyContent = N'您的游戏币不低于 '+CAST(@ScoreCondition AS NVARCHAR)+N'，不可领取！'	
+		RETURN 1	
+	END	
+
+	-- 领取记录
+	DECLARE @TodayDateID INT
+	DECLARE @TodayTakeTimes INT		
+	SET @TodayDateID=CAST(CAST(GetDate() AS FLOAT) AS INT)	
+	SELECT @TodayTakeTimes=TakeTimes FROM AccountsBaseEnsure WHERE UserID=@dwUserID AND TakeDateID=@TodayDateID
+	IF @TodayTakeTimes IS NULL SET @TodayTakeTimes=0	
+
+	-- 次数判断
+	IF @TodayTakeTimes >= @TakeTimes
+	BEGIN
+		SET @strNotifyContent = N'您今日已领取 '+CAST(@TodayTakeTimes AS NVARCHAR)+N' 次，领取失败！'
+		return 3		
+	END
+
+	-- 更新记录
+	IF @TodayTakeTimes=0
+	BEGIN
+		SET @TodayTakeTimes = 1
+		INSERT INTO AccountsBaseEnsure(UserID,TakeDateID,TakeTimes,TakeGold) VALUES(@dwUserID,@TodayDateID,@TodayTakeTimes,@ScoreAmount)		
+	END ELSE
+	BEGIN
+		SET @TodayTakeTimes = @TodayTakeTimes+1
+		UPDATE AccountsBaseEnsure SET TakeTimes=@TodayTakeTimes,TakeGold=TakeGold+@ScoreAmount WHERE UserID = @dwUserID AND TakeDateID=@TodayDateID		
+	END	
+
+	-- 领取金币	
+	UPDATE   THTreasureDB.dbo.GameScoreInfo SET Score = Score + @ScoreAmount WHERE UserID = @dwUserID
+
+	-- 查询金币
+	SELECT @Score=Score FROM   THTreasureDB.dbo.GameScoreInfo WHERE UserID = @dwUserID 	
+
+	-- 输出提示
+	SET @strNotifyContent = N'恭喜您，低保领取成功！您今日还可领取 '+CAST(@TakeTimes-@TodayTakeTimes AS NVARCHAR)+N' 次！'
+	
+	-- 抛出数据
+	SELECT @Score AS Score	
+END
+
+RETURN 0
+
+

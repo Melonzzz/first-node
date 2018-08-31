@@ -1,2 +1,1 @@
-# first-node
-my-node
+#node
